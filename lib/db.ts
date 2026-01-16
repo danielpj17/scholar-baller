@@ -84,7 +84,7 @@ export async function scholarshipUrlExists(url: string): Promise<boolean> {
   try {
     const result = await sql`
       SELECT id FROM scholarships WHERE url = ${url} LIMIT 1
-    `;
+    ` as any[];
     return result.length > 0;
   } catch (error) {
     console.error('Error checking scholarship URL:', error);
@@ -97,7 +97,7 @@ export async function getAllScholarshipUrls(): Promise<string[]> {
   try {
     const result = await sql`
       SELECT url FROM scholarships
-    `;
+    ` as any[];
     return result.map((row: any) => row.url);
   } catch (error) {
     console.error('Error fetching scholarship URLs:', error);

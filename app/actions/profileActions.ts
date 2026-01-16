@@ -9,7 +9,7 @@ export async function saveUserProfile(profile: UserProfile): Promise<{ success: 
     // Check if profile exists
     const existing = await sql`
       SELECT id FROM user_profiles ORDER BY created_at DESC LIMIT 1
-    `;
+    ` as any[];
 
     if (existing.length > 0) {
       // Update existing profile
@@ -38,7 +38,7 @@ export async function getUserProfile(): Promise<UserProfile | null> {
   try {
     const result = await sql`
       SELECT profile_data FROM user_profiles ORDER BY created_at DESC LIMIT 1
-    `;
+    ` as any[];
 
     if (result.length === 0) {
       return null;

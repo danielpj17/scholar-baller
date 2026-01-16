@@ -35,7 +35,7 @@ export async function generateEssay(scholarshipId: string): Promise<GenerateEssa
     // Fetch user profile from database
     const profileResult = await sql`
       SELECT profile_data FROM user_profiles ORDER BY created_at DESC LIMIT 1
-    `;
+    ` as any[];
 
     if (profileResult.length === 0) {
       return {

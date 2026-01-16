@@ -38,7 +38,7 @@ export async function getAllScholarships(): Promise<Scholarship[]> {
     const result = await sql`
       SELECT * FROM scholarships 
       ORDER BY fit_score DESC, created_at DESC
-    `;
+    ` as any[];
     return result.map(rowToScholarship);
   } catch (error) {
     console.error('Error fetching all scholarships:', error);
@@ -53,7 +53,7 @@ export async function getSavedScholarships(): Promise<Scholarship[]> {
       SELECT * FROM scholarships 
       WHERE is_saved = true 
       ORDER BY fit_score DESC, created_at DESC
-    `;
+    ` as any[];
     return result.map(rowToScholarship);
   } catch (error) {
     console.error('Error fetching saved scholarships:', error);
@@ -68,7 +68,7 @@ export async function getAppliedScholarships(): Promise<Scholarship[]> {
       SELECT * FROM scholarships 
       WHERE is_applied = true 
       ORDER BY updated_at DESC
-    `;
+    ` as any[];
     return result.map(rowToScholarship);
   } catch (error) {
     console.error('Error fetching applied scholarships:', error);
@@ -82,7 +82,7 @@ export async function toggleSaved(id: string): Promise<{ success: boolean; isSav
     // Get current status
     const current = await sql`
       SELECT is_saved FROM scholarships WHERE id = ${id}
-    `;
+    ` as any[];
     
     if (current.length === 0) {
       return { success: false };
@@ -183,7 +183,7 @@ export async function insertScholarship(scholarship: Scholarship): Promise<{ suc
         essay_prompt = EXCLUDED.essay_prompt,
         updated_at = NOW()
       RETURNING id
-    `;
+    ` as any[];
     
     return { success: true, id: result[0]?.id };
   } catch (error) {
@@ -197,7 +197,7 @@ export async function getScholarshipById(id: string): Promise<Scholarship | null
   try {
     const result = await sql`
       SELECT * FROM scholarships WHERE id = ${id} LIMIT 1
-    `;
+    ` as any[];
     
     if (result.length === 0) {
       return null;
@@ -217,9 +217,9 @@ export async function getScholarshipCounts(): Promise<{
   applied: number;
 }> {
   try {
-    const totalResult = await sql`SELECT COUNT(*) as count FROM scholarships`;
-    const savedResult = await sql`SELECT COUNT(*) as count FROM scholarships WHERE is_saved = true`;
-    const appliedResult = await sql`SELECT COUNT(*) as count FROM scholarships WHERE is_applied = true`;
+    const totalResult = await sql`SELECT COUNT(*) as count FROM scholarships` as any[];
+    const savedResult = await sql`SELECT COUNT(*) as count FROM scholarships WHERE is_saved = true` as any[];
+    const appliedResult = await sql`SELECT COUNT(*) as count FROM scholarships WHERE is_applied = true` as any[];
 
     return {
       total: parseInt(totalResult[0]?.count || '0'),
