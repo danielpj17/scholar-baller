@@ -1,6 +1,18 @@
 import { neon } from '@neondatabase/serverless';
 
-const sql = neon(process.env.DATABASE_URL || '');
+// Handle missing DATABASE_URL gracefully for build time
+const connectionString = process.env.DATABASE_URL || '';
+
+let sql: ReturnType<typeof neon>;
+
+if (connectionString) {
+  sql = neon(connectionString);
+} else {
+  // Provide a mock during build time that throws helpful error at runtime
+  sql = (async () => {
+    throw new Error('DATABASE_URL environment variable is not set. Please add it to your .env.local file or Vercel environment variables.');
+  }) as any;
+}
 
 export { sql };
 
