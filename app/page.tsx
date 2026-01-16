@@ -1,19 +1,22 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { Scholarship, EligibilityStatus } from '@/types';
-import { mockScholarships } from '@/data/mockData';
-import { userProfile } from '@/constants/profile';
+import { useProfile } from '@/contexts/ProfileContext';
 import { analyzeScholarship } from '@/app/actions/analyzeScholarship';
-import { discoverScholarships, DiscoveredScholarship } from '@/app/actions/discoverScholarships';
+import { discoverScholarships } from '@/app/actions/discoverScholarships';
 import { scholarshipSources } from '@/constants/sources';
+import { insertScholarship, getScholarshipCounts, getAllScholarships } from '@/app/actions/scholarshipActions';
 
 export default function Dashboard() {
-  const [scholarships, setScholarships] = useState<Scholarship[]>(mockScholarships);
+  const { profile, addQuestions, unansweredCount } = useProfile();
+  const [scholarships, setScholarships] = useState<Scholarship[]>([]);
   const [url, setUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [counts, setCounts] = useState({ total: 0, saved: 0, applied: 0 });
   
   // Discovery state
   const [isDiscovering, setIsDiscovering] = useState(false);
@@ -22,6 +25,22 @@ export default function Dashboard() {
     scholarshipSources.filter((s) => s.enabled).map((s) => s.id)
   );
   const [showSourceSelector, setShowSourceSelector] = useState(false);
+
+  // Load scholarships and counts on mount
+  useEffect(() => {
+    loadScholarships();
+    loadCounts();
+  }, []);
+
+  const loadScholarships = async () => {
+    const data = await getAllScholarships();
+    setScholarships(data.slice(0, 10)); // Show top 10 on dashboard
+  };
+
+  const loadCounts = async () => {
+    const data = await getScholarshipCounts();
+    setCounts(data);
+  };
 
   const handleAnalyze = async () => {
     if (!url.trim()) {
@@ -33,11 +52,26 @@ export default function Dashboard() {
     setError(null);
 
     try {
-      const result = await analyzeScholarship(url, userProfile);
+      const result = await analyzeScholarship(url, profile);
 
       if (result.success) {
-        setScholarships((prev) => [result.scholarship, ...prev]);
+        // Save to database
+        await insertScholarship(result.scholarship);
+        
+        // Reload scholarships and counts
+        await loadScholarships();
+        await loadCounts();
+        
         setUrl('');
+        
+        // Store any questions that need answering
+        if (result.scholarship.questionsForUser.length > 0) {
+          addQuestions(
+            result.scholarship.id,
+            result.scholarship.name,
+            result.scholarship.questionsForUser
+          );
+        }
       } else {
         setError(result.error);
       }
@@ -72,39 +106,48 @@ export default function Dashboard() {
 
     setIsDiscovering(true);
     setError(null);
-    setDiscoveryProgress('Searching scholarship sources...');
+    setDiscoveryProgress('Searching scholarship sources (scanning 5-10 pages per source)...');
 
     try {
-      // Step 1: Discover scholarship URLs
-      const discoveryResult = await discoverScholarships(userProfile, selectedSources, 10);
+      // Step 1: Discover scholarship URLs (with pagination and duplicate checking)
+      const discoveryResult = await discoverScholarships(profile, selectedSources, 10);
 
       if (!discoveryResult.success && discoveryResult.scholarships.length === 0) {
         setError(discoveryResult.errors.join('; ') || 'No scholarships found');
         setIsDiscovering(false);
+        setDiscoveryProgress('');
         return;
       }
 
       const discovered = discoveryResult.scholarships;
-      setDiscoveryProgress(`Found ${discovered.length} scholarships. Analyzing...`);
+      setDiscoveryProgress(
+        `Found ${discovered.length} new scholarships (${discoveryResult.duplicateCount} duplicates skipped). Analyzing...`
+      );
 
       // Step 2: Analyze each discovered scholarship
+      let analyzedCount = 0;
       for (let i = 0; i < discovered.length; i++) {
         const scholarship = discovered[i];
         setDiscoveryProgress(
-          `Analyzing ${i + 1}/${discovered.length}: ${scholarship.name.substring(0, 40)}...`
+          `Analyzing ${i + 1}/${discovered.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved)`
         );
 
         try {
-          const result = await analyzeScholarship(scholarship.url, userProfile);
+          const result = await analyzeScholarship(scholarship.url, profile);
 
           if (result.success) {
-            setScholarships((prev) => {
-              // Avoid duplicates by URL
-              if (prev.some((s) => s.url === result.scholarship.url)) {
-                return prev;
-              }
-              return [result.scholarship, ...prev];
-            });
+            // Save to database
+            await insertScholarship(result.scholarship);
+            analyzedCount++;
+            
+            // Store any questions that need answering
+            if (result.scholarship.questionsForUser.length > 0) {
+              addQuestions(
+                result.scholarship.id,
+                result.scholarship.name,
+                result.scholarship.questionsForUser
+              );
+            }
           }
         } catch (err) {
           console.error(`Failed to analyze ${scholarship.url}:`, err);
@@ -116,9 +159,17 @@ export default function Dashboard() {
         }
       }
 
+      // Reload scholarships and counts from database
+      await loadScholarships();
+      await loadCounts();
+
       setDiscoveryProgress('');
+      
+      const successMsg = `Successfully analyzed and saved ${analyzedCount} new scholarships!`;
       if (discoveryResult.errors.length > 0) {
-        setError(`Completed with warnings: ${discoveryResult.errors.join('; ')}`);
+        setError(`${successMsg} Warnings: ${discoveryResult.errors.join('; ')}`);
+      } else {
+        setError(successMsg);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to discover scholarships');
@@ -196,10 +247,39 @@ export default function Dashboard() {
                 </p>
               </div>
             </div>
-            <div className="flex items-center gap-2 text-sm" style={{ color: 'var(--muted)' }}>
-              <span className="px-3 py-1 rounded-full" style={{ background: 'var(--surface-elevated)', border: '1px solid var(--border)' }}>
-                {scholarships.length} scholarship{scholarships.length !== 1 ? 's' : ''}
-              </span>
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2 px-3 py-1 rounded-full text-sm" style={{ background: 'var(--surface-elevated)', border: '1px solid var(--border)', color: 'var(--muted)' }}>
+                <span className="font-semibold" style={{ color: 'var(--foreground)' }}>{counts.total}</span> total
+                <span style={{ color: 'var(--border)' }}>|</span>
+                <span className="font-semibold" style={{ color: 'var(--warning)' }}>{counts.saved}</span> saved
+                <span style={{ color: 'var(--border)' }}>|</span>
+                <span className="font-semibold" style={{ color: 'var(--success)' }}>{counts.applied}</span> applied
+              </div>
+              <Link
+                href="/scholarships"
+                className="px-4 py-2 rounded-xl text-sm font-medium transition-all hover:scale-[1.02]"
+                style={{ background: 'var(--accent-bg)', border: '1px solid var(--accent)', color: 'var(--accent)' }}
+              >
+                View All Scholarships
+              </Link>
+              <Link
+                href="/settings"
+                className="relative p-2.5 rounded-xl transition-all hover:scale-[1.05]"
+                style={{ background: 'var(--surface-elevated)', border: '1px solid var(--border)' }}
+              >
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--muted)' }}>
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
+                </svg>
+                {unansweredCount > 0 && (
+                  <span
+                    className="absolute -top-1 -right-1 w-5 h-5 rounded-full text-xs font-bold flex items-center justify-center text-white"
+                    style={{ background: 'var(--warning)' }}
+                  >
+                    {unansweredCount}
+                  </span>
+                )}
+              </Link>
             </div>
           </div>
         </div>
@@ -384,7 +464,7 @@ export default function Dashboard() {
                     ))}
                 </div>
                 <div className="mt-3 text-xs" style={{ color: 'var(--muted)' }}>
-                  Tip: The search may take 30-60 seconds as we scan each source and analyze found scholarships.
+                  Tip: Scans 5-10 pages per source (~50-100 scholarships). May take 2-5 minutes. Duplicates are automatically skipped.
                 </div>
               </div>
             )}
@@ -439,7 +519,7 @@ export default function Dashboard() {
               No scholarships yet
             </h3>
             <p style={{ color: 'var(--muted)' }}>
-              Paste a scholarship URL above to get started
+              Click "Find Scholarships" above to automatically discover and analyze scholarships, or paste a specific URL
             </p>
           </div>
         ) : (
