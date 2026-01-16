@@ -1,23 +1,4 @@
-import { Scholarship, UserProfile, EligibilityStatus } from '@/types';
-
-export const mockUserProfile: UserProfile = {
-  major: 'Computer Science',
-  gpa: 3.7,
-  university: 'University of California, Berkeley',
-  currentLocation: 'Berkeley, CA',
-  experiences: [
-    'Software Engineering Intern at Google',
-    'Research Assistant in Machine Learning Lab',
-    'President of ACM Student Chapter',
-    'Volunteer tutor for underprivileged students',
-  ],
-  interests: [
-    'Artificial Intelligence',
-    'Web Development',
-    'Open Source Contributing',
-    'EdTech',
-  ],
-};
+import { Scholarship, EligibilityStatus } from '@/types';
 
 export const mockScholarships: Scholarship[] = [
   {
