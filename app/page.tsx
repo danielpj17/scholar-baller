@@ -256,9 +256,26 @@ export default function Dashboard() {
             errors.push(`${scholarship.name}: ${result.error}`);
             console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
             
+            // #region agent log
+            fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Analysis failed',data:{url:scholarship.url,name:scholarship.name,error:result.error,errorLower:result.error.toLowerCase(),hasQuota:result.error.toLowerCase().includes('quota'),has429:result.error.includes('429'),hasExceeded:result.error.toLowerCase().includes('exceeded')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
+            
             // If it's a quota error, stop processing to avoid more failures
-            if (result.error.includes('quota') || result.error.includes('429')) {
+            // Check for quota errors (case-insensitive and multiple patterns)
+            const errorLower = result.error.toLowerCase();
+            const isQuotaError = errorLower.includes('quota') || 
+                                result.error.includes('429') || 
+                                errorLower.includes('quota exceeded') ||
+                                errorLower.includes('rate limit') ||
+                                errorLower.includes('too many requests');
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Quota check result',data:{isQuotaError,error:result.error},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+            // #endregion
+            
+            if (isQuotaError) {
               console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+              quotaExceeded = true;
               break;
             }
           }
@@ -267,8 +284,24 @@ export default function Dashboard() {
           errors.push(`${scholarship.name}: ${errorMsg}`);
           console.error(`Failed to analyze ${scholarship.url}:`, err);
           
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Exception caught',data:{url:scholarship.url,name:scholarship.name,errorMsg,errorLower:errorMsg.toLowerCase(),hasQuota:errorMsg.toLowerCase().includes('quota'),has429:errorMsg.includes('429')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+          // #endregion
+          
           // If it's a quota error, stop processing
-          if (errorMsg.includes('quota') || errorMsg.includes('429')) {
+          // Check for quota errors (case-insensitive and multiple patterns)
+          const errorLower = errorMsg.toLowerCase();
+          const isQuotaError = errorLower.includes('quota') || 
+                              errorMsg.includes('429') || 
+                              errorLower.includes('quota exceeded') ||
+                              errorLower.includes('rate limit') ||
+                              errorLower.includes('too many requests');
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Quota check result (exception)',data:{isQuotaError,errorMsg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          
+          if (isQuotaError) {
             console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
             quotaExceeded = true;
             break;
@@ -285,9 +318,17 @@ export default function Dashboard() {
         }
       }
       
+      // Calculate total not analyzed (initial skip + early stop due to quota)
+      const remainingInBatch = quotaExceeded ? scholarshipsToAnalyze.length - analyzedCount - errors.length : 0;
+      const totalNotAnalyzed = skippedCount + remainingInBatch;
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Analysis summary',data:{discovered:discovered.length,scholarshipsToAnalyze:scholarshipsToAnalyze.length,analyzedCount,skippedCount,remainingInBatch,totalNotAnalyzed,quotaExceeded,errorsCount:errors.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+      
       // If we skipped some, add them back to the discovered list for next time
-      if (skippedCount > 0) {
-        console.log(`Note: ${skippedCount} scholarships were not analyzed this run to stay within API quota. Run discovery again to analyze the remaining scholarships.`);
+      if (totalNotAnalyzed > 0) {
+        console.log(`Note: ${totalNotAnalyzed} scholarships were not analyzed this run to stay within API quota. Run discovery again to analyze the remaining scholarships.`);
       }
 
       // Reload scholarships and counts from database
@@ -299,14 +340,14 @@ export default function Dashboard() {
       // Show detailed results
       let resultMsg = '';
       if (quotaExceeded) {
-        resultMsg = `⚠️ API quota exceeded. Only ${analyzedCount} scholarship(s) were analyzed. Please wait for quota reset (typically daily) or upgrade your plan.`;
+        resultMsg = `⚠️ API quota exceeded. Only ${analyzedCount} scholarship(s) were analyzed. ${totalNotAnalyzed > 0 ? `${totalNotAnalyzed} scholarship(s) were not analyzed this run to stay within API quota. ` : ''}Please wait for quota reset (typically daily) or upgrade your plan. Run discovery again to analyze the remaining scholarships.`;
       } else if (analyzedCount > 0) {
         resultMsg = `✓ Successfully analyzed and saved ${analyzedCount} new scholarships!`;
-        if (skippedCount > 0) {
-          resultMsg += ` (${skippedCount} scholarships skipped to stay within API quota - run discovery again to analyze them)`;
+        if (totalNotAnalyzed > 0) {
+          resultMsg += ` (${totalNotAnalyzed} scholarships skipped to stay within API quota - run discovery again to analyze them)`;
         }
       } else {
-        resultMsg = `No scholarships were analyzed. ${skippedCount > 0 ? `${skippedCount} skipped due to API quota limits. ` : ''}Run discovery again to analyze them.`;
+        resultMsg = `No scholarships were analyzed. ${totalNotAnalyzed > 0 ? `${totalNotAnalyzed} skipped due to API quota limits. ` : ''}Run discovery again to analyze them.`;
       }
       
       if (errors.length > 0) {

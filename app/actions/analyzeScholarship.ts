@@ -406,11 +406,25 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
     if (error instanceof Error) {
       errorMessage = error.message;
       
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:analyzeScholarship',message:'Raw error before processing',data:{url,errorMessage,errorName:error.name,has429:errorMessage.includes('429'),hasQuota:errorMessage.toLowerCase().includes('quota'),hasExceeded:errorMessage.toLowerCase().includes('exceeded'),hasRateLimit:errorMessage.toLowerCase().includes('rate limit')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'L'})}).catch(()=>{});
+      // #endregion
+      
       // Provide more helpful error messages
-      // Check for API quota errors first (before generic "fetch" check)
-      if (errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('Quota exceeded')) {
-        errorMessage = 'Gemini API quota exceeded - you have reached your free tier limit. Please check your API usage or upgrade your plan.';
-      } else if (errorMessage.includes('GoogleGenerativeAI Error') && errorMessage.includes('429')) {
+      // Check for API quota errors first (case-insensitive, multiple patterns)
+      const errorLower = errorMessage.toLowerCase();
+      const isQuotaError = errorMessage.includes('429') || 
+                          errorLower.includes('quota') || 
+                          errorLower.includes('quota exceeded') ||
+                          errorLower.includes('rate limit') ||
+                          errorLower.includes('too many requests') ||
+                          (errorMessage.includes('GoogleGenerativeAI Error') && errorMessage.includes('429'));
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:analyzeScholarship',message:'Quota error detection',data:{url,isQuotaError,errorMessage},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'M'})}).catch(()=>{});
+      // #endregion
+      
+      if (isQuotaError) {
         errorMessage = 'Gemini API quota exceeded - you have reached your free tier limit. Please check your API usage or upgrade your plan.';
       } else if (errorMessage.includes('timeout')) {
         errorMessage = 'Page took too long to load';
@@ -419,10 +433,15 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
       } else if (errorMessage.includes('JSON')) {
         errorMessage = 'AI response format error';
       } else if (errorMessage.includes('API') || errorMessage.includes('generativelanguage')) {
+        // Generic API error - but make sure it mentions quota for detection
         errorMessage = 'Gemini API error - check your API key and quota';
       } else if (errorMessage.includes('fetch') && !errorMessage.includes('generativelanguage')) {
         errorMessage = 'Failed to load page (network error or blocked)';
       }
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:analyzeScholarship',message:'Final error message',data:{url,finalErrorMessage:errorMessage},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'N'})}).catch(()=>{});
+      // #endregion
     }
     
     return {
