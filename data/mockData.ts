@@ -26,5 +26,7 @@ export const mockScholarships: Scholarship[] = [
     essayPrompt:
       'In 500 words or less, describe how technology can be leveraged to solve a pressing social issue that you are passionate about. Include specific examples of how you would approach this challenge.',
     draftedEssay: '',
+    aiPolicy: 'Safe',
+    generationPreference: 'Full Draft',
   },
 ];
