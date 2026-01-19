@@ -14,6 +14,7 @@ const genAI = new GoogleGenerativeAI(apiKey);
 
 async function scrapeWebpage(url: string, retries: number = 2): Promise<string> {
   let lastError: Error | null = null;
+  const isBoldOrg = url.includes('bold.org');
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -21,11 +22,18 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
         // Wait before retry (exponential backoff)
         const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
         console.log(`Retry ${attempt}/${retries} for ${url} after ${delay}ms`);
+        // #region agent log
+        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Retry attempt',data:{url,attempt,retries,delay,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
         await new Promise(resolve => setTimeout(resolve, delay));
       }
 
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Starting fetch',data:{url,attempt,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), 30000); // Increased to 30 seconds for Bold.org
 
       const response = await fetch(url, {
         signal: controller.signal,
@@ -45,13 +53,21 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
           'Sec-Fetch-Site': 'none',
           'Sec-Fetch-User': '?1',
           'Upgrade-Insecure-Requests': '1',
+          'Referer': isBoldOrg ? 'https://bold.org/scholarships/' : undefined,
         },
       });
 
       clearTimeout(timeoutId);
 
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Fetch response received',data:{url,status:response.status,statusText:response.statusText,ok:response.ok,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+      // #endregion
+
       if (!response.ok) {
         const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        // #region agent log
+        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'HTTP error response',data:{url,status:response.status,statusText:response.statusText,isBlocked:response.status===403||response.status===429,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         if (response.status === 403 || response.status === 429) {
           // Rate limited or blocked, don't retry immediately
           throw error;
@@ -62,8 +78,15 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
 
       const html = await response.text();
       
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'HTML received',data:{url,htmlLength:html?.length||0,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
+      // #endregion
+      
       if (!html || html.length < 100) {
         lastError = new Error('Page content too short or empty');
+        // #region agent log
+        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'HTML too short',data:{url,htmlLength:html?.length||0,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'G'})}).catch(()=>{});
+        // #endregion
         continue;
       }
 
@@ -81,6 +104,9 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
         const element = $(selector);
         if (element.length > 0) {
           content = element.text();
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Content extracted from selector',data:{url,selector,contentLength:content?.length||0,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H'})}).catch(()=>{});
+          // #endregion
           break;
         }
       }
@@ -88,10 +114,17 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
       // Fallback to body if no main content found
       if (!content) {
         content = $('body').text();
+        // #region agent log
+        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Content extracted from body fallback',data:{url,contentLength:content?.length||0,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'H'})}).catch(()=>{});
+        // #endregion
       }
 
       // Clean up whitespace
       content = content.replace(/\s+/g, ' ').trim();
+
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Content after cleanup',data:{url,contentLength:content?.length||0,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'I'})}).catch(()=>{});
+      // #endregion
 
       // Limit content length to avoid token limits
       const maxLength = 8000;
@@ -103,6 +136,15 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
       
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
+      const errorMsg = lastError.message;
+      const isTimeout = errorMsg.includes('aborted') || errorMsg.includes('timeout');
+      const isNetwork = errorMsg.includes('fetch') || errorMsg.includes('network');
+      const isBlocked = errorMsg.includes('403') || errorMsg.includes('429');
+      
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'Fetch error caught',data:{url,attempt,errorMsg,isTimeout,isNetwork,isBlocked,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
+      
       if (attempt === retries) {
         console.error(`Failed to scrape ${url} after ${retries + 1} attempts:`, lastError.message);
       }
@@ -110,6 +152,9 @@ async function scrapeWebpage(url: string, retries: number = 2): Promise<string> 
   }
   
   // All retries failed
+  // #region agent log
+  fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:scrapeWebpage',message:'All retries failed',data:{url,lastError:lastError?.message,isBoldOrg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'F'})}).catch(()=>{});
+  // #endregion
   throw lastError || new Error('Failed to scrape webpage');
 }
 
@@ -156,7 +201,14 @@ export async function analyzeScholarship(
     // Step 1: Scrape the webpage
     const scrapedContent = await scrapeWebpage(url);
 
+    // #region agent log
+    fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:analyzeScholarship',message:'Scraped content check',data:{url,contentLength:scrapedContent?.length||0,isBoldOrg:url.includes('bold.org')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'J'})}).catch(()=>{});
+    // #endregion
+
     if (!scrapedContent || scrapedContent.length < 50) {
+      // #region agent log
+      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:analyzeScholarship',message:'Content too short after scraping',data:{url,contentLength:scrapedContent?.length||0,isBoldOrg:url.includes('bold.org')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'J'})}).catch(()=>{});
+      // #endregion
       return {
         success: false,
         error: 'Could not extract meaningful content from the URL. The page might be JavaScript-rendered or blocked.',
@@ -336,21 +388,35 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
   } catch (error) {
     console.error('Error analyzing scholarship:', error);
     
+    // #region agent log
+    const errorDetails = error instanceof Error ? {
+      message: error.message,
+      name: error.name,
+      stack: error.stack?.substring(0, 500)
+    } : { message: String(error) };
+    fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analyzeScholarship.ts:analyzeScholarship',message:'Error caught in analyzeScholarship',data:{url,errorDetails,isBoldOrg:url.includes('bold.org')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'K'})}).catch(()=>{});
+    // #endregion
+    
     let errorMessage = 'An unexpected error occurred';
     if (error instanceof Error) {
       errorMessage = error.message;
       
       // Provide more helpful error messages
-      if (errorMessage.includes('fetch')) {
-        errorMessage = 'Failed to load page (network error or blocked)';
+      // Check for API quota errors first (before generic "fetch" check)
+      if (errorMessage.includes('429') || errorMessage.includes('quota') || errorMessage.includes('Quota exceeded')) {
+        errorMessage = 'Gemini API quota exceeded - you have reached your free tier limit. Please check your API usage or upgrade your plan.';
+      } else if (errorMessage.includes('GoogleGenerativeAI Error') && errorMessage.includes('429')) {
+        errorMessage = 'Gemini API quota exceeded - you have reached your free tier limit. Please check your API usage or upgrade your plan.';
       } else if (errorMessage.includes('timeout')) {
         errorMessage = 'Page took too long to load';
-      } else if (errorMessage.includes('HTTP')) {
+      } else if (errorMessage.includes('HTTP') && !errorMessage.includes('generativelanguage')) {
         errorMessage = `Page access denied: ${errorMessage}`;
       } else if (errorMessage.includes('JSON')) {
         errorMessage = 'AI response format error';
-      } else if (errorMessage.includes('API')) {
+      } else if (errorMessage.includes('API') || errorMessage.includes('generativelanguage')) {
         errorMessage = 'Gemini API error - check your API key and quota';
+      } else if (errorMessage.includes('fetch') && !errorMessage.includes('generativelanguage')) {
+        errorMessage = 'Failed to load page (network error or blocked)';
       }
     }
     

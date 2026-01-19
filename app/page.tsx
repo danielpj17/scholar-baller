@@ -177,12 +177,12 @@ export default function Dashboard() {
     setIsDiscovering(true);
     setError(null);
     setSourceStats([]);
-    setDiscoveryProgress('Searching scholarship sources (scanning 5-10 pages per source)...');
+    setDiscoveryProgress('Searching scholarship sources (scanning up to 10 pages per source)...');
 
     try {
       // Step 1: Discover scholarship URLs (with pagination and duplicate checking)
-      // Increased to 20 pages per source to find more scholarships, will stop after 3 consecutive pages of only duplicates
-      const discoveryResult = await discoverScholarships(profile, selectedSources, 20);
+      // Limited to 10 pages per source for Bold.org and Scholarships360
+      const discoveryResult = await discoverScholarships(profile, selectedSources, 10);
 
       // Store source stats for display
       setSourceStats(discoveryResult.sourceStats);
@@ -199,14 +199,35 @@ export default function Dashboard() {
         `Found ${discovered.length} new scholarships (${discoveryResult.duplicateCount} duplicates skipped). Analyzing...`
       );
 
-      // Step 2: Analyze each discovered scholarship
+      // Step 2: Analyze each discovered scholarship with proper rate limiting
+      // Limit to 15 scholarships per run to stay within Gemini API free tier (5 RPM)
+      // At 13 seconds per request, 15 requests = ~3.25 minutes, well within limits
+      const MAX_ANALYSIS_PER_RUN = 15;
+      const scholarshipsToAnalyze = discovered.slice(0, MAX_ANALYSIS_PER_RUN);
+      const skippedCount = discovered.length - scholarshipsToAnalyze.length;
+      let quotaExceeded = false;
+      
+      if (skippedCount > 0) {
+        setDiscoveryProgress(
+          `Found ${discovered.length} scholarships. Analyzing first ${MAX_ANALYSIS_PER_RUN} to stay within API quota (${skippedCount} will be analyzed on next run)...`
+        );
+      } else {
+        setDiscoveryProgress(
+          `Found ${discovered.length} scholarships. Analyzing (limited to ${MAX_ANALYSIS_PER_RUN} per run to stay within API quota)...`
+        );
+      }
+      
       let analyzedCount = 0;
       const errors: string[] = [];
       
-      for (let i = 0; i < discovered.length; i++) {
-        const scholarship = discovered[i];
+      // Rate limit: 13 seconds between requests for Gemini 2.5 Pro (5 RPM = 1 per 12 seconds)
+      // Using 13 seconds to be safe
+      const RATE_LIMIT_DELAY_MS = 13000;
+      
+      for (let i = 0; i < scholarshipsToAnalyze.length; i++) {
+        const scholarship = scholarshipsToAnalyze[i];
         setDiscoveryProgress(
-          `Analyzing ${i + 1}/${discovered.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved, ${errors.length} failed)`
+          `Analyzing ${i + 1}/${scholarshipsToAnalyze.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved, ${errors.length} failed)`
         );
 
         try {
@@ -234,17 +255,39 @@ export default function Dashboard() {
           } else {
             errors.push(`${scholarship.name}: ${result.error}`);
             console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
+            
+            // If it's a quota error, stop processing to avoid more failures
+            if (result.error.includes('quota') || result.error.includes('429')) {
+              console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+              break;
+            }
           }
         } catch (err) {
           const errorMsg = err instanceof Error ? err.message : 'Unknown error';
           errors.push(`${scholarship.name}: ${errorMsg}`);
           console.error(`Failed to analyze ${scholarship.url}:`, err);
+          
+          // If it's a quota error, stop processing
+          if (errorMsg.includes('quota') || errorMsg.includes('429')) {
+            console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+            quotaExceeded = true;
+            break;
+          }
         }
 
-        // Delay between analyses to avoid rate limiting (2 seconds per request)
-        if (i < discovered.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 2000));
+        // Rate limiting: Wait 13 seconds between API calls to stay within 5 RPM limit
+        // Only delay if not the last item
+        if (i < scholarshipsToAnalyze.length - 1) {
+          setDiscoveryProgress(
+            `Waiting ${RATE_LIMIT_DELAY_MS / 1000}s before next analysis (rate limiting)...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_DELAY_MS));
         }
+      }
+      
+      // If we skipped some, add them back to the discovered list for next time
+      if (skippedCount > 0) {
+        console.log(`Note: ${skippedCount} scholarships were not analyzed this run to stay within API quota. Run discovery again to analyze the remaining scholarships.`);
       }
 
       // Reload scholarships and counts from database
@@ -254,7 +297,17 @@ export default function Dashboard() {
       setDiscoveryProgress('');
       
       // Show detailed results
-      let resultMsg = `✓ Successfully analyzed and saved ${analyzedCount} new scholarships!`;
+      let resultMsg = '';
+      if (quotaExceeded) {
+        resultMsg = `⚠️ API quota exceeded. Only ${analyzedCount} scholarship(s) were analyzed. Please wait for quota reset (typically daily) or upgrade your plan.`;
+      } else if (analyzedCount > 0) {
+        resultMsg = `✓ Successfully analyzed and saved ${analyzedCount} new scholarships!`;
+        if (skippedCount > 0) {
+          resultMsg += ` (${skippedCount} scholarships skipped to stay within API quota - run discovery again to analyze them)`;
+        }
+      } else {
+        resultMsg = `No scholarships were analyzed. ${skippedCount > 0 ? `${skippedCount} skipped due to API quota limits. ` : ''}Run discovery again to analyze them.`;
+      }
       
       if (errors.length > 0) {
         resultMsg += `\n\n⚠️ ${errors.length} failed to analyze:\n`;

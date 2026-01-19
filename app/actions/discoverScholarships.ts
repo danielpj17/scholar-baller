@@ -109,6 +109,52 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Random delay helper for anti-bot protection (2000-5000ms)
+function randomDelay(): Promise<void> {
+  const ms = Math.random() * (5000 - 2000) + 2000;
+  return delay(ms);
+}
+
+// Redirect detection helper - checks if a requested paginated page was redirected to the first page
+function checkRedirect(requestedUrl: string, finalUrl: string, page: number, source: string): boolean {
+  if (page <= 1) {
+    return false; // No redirect check needed for first page
+  }
+
+  // Normalize URLs for comparison
+  const normalizedRequested = requestedUrl.toLowerCase();
+  const normalizedFinal = finalUrl.toLowerCase();
+
+  // Check for redirect patterns specific to each source
+  if (source === 'Bold.org') {
+    // For Bold.org, if we requested /scholarships/X/ but ended up on /scholarships/ (first page)
+    // Check if we requested a numbered page but got redirected to the base page
+    if (normalizedRequested.includes(`/scholarships/${page}/`) && 
+        (normalizedFinal.endsWith('/scholarships/') || normalizedFinal.endsWith('/scholarships'))) {
+      console.warn(`⚠️ Bold.org: Redirect detected! Requested page ${page} (${requestedUrl}) but got redirected to first page (${finalUrl})`);
+      return true;
+    }
+  } else if (source === 'Scholarships360') {
+    // For Scholarships360, if we requested current_page=X but ended up on /scholarships/search/ without current_page parameter
+    if (normalizedRequested.includes(`current_page=${page}`) && 
+        normalizedFinal.includes('/scholarships/search') &&
+        !normalizedFinal.includes(`current_page=${page}`)) {
+      console.warn(`⚠️ Scholarships360: Redirect detected! Requested page ${page} (${requestedUrl}) but got redirected to first page (${finalUrl})`);
+      return true;
+    }
+  } else if (source === 'Scholarships.com') {
+    // For Scholarships.com, if we requested ?page=X but ended up on directory without page parameter
+    if (normalizedRequested.includes('?page=') && 
+        normalizedFinal.includes('/scholarship-directory') &&
+        !normalizedFinal.includes('?page=')) {
+      console.warn(`⚠️ Scholarships.com: Redirect detected! Requested page ${page} (${requestedUrl}) but got redirected to first page (${finalUrl})`);
+      return true;
+    }
+  }
+
+  return false;
+}
+
 // Puppeteer browser instance (singleton)
 let browserInstance: any = null;
 
@@ -172,7 +218,8 @@ async function getBrowser() {
 }
 
 // Fetch HTML using Puppeteer (for JavaScript-rendered pages)
-async function fetchWithPuppeteer(url: string, retries = 2): Promise<string | null> {
+// Returns both HTML and final URL for redirect detection
+async function fetchWithPuppeteer(url: string, retries = 2): Promise<{ html: string; finalUrl: string } | null> {
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -204,8 +251,11 @@ async function fetchWithPuppeteer(url: string, retries = 2): Promise<string | nu
         timeout: 30000,
       });
 
+      // Get final URL after navigation (may differ if redirected)
+      const finalUrl = page.url();
+
       // Wait a bit more for any lazy-loaded content
-      await delay(2000);
+      await randomDelay();
 
       // Scroll multiple times to trigger infinite scroll / lazy loading
       // Some sites load content as you scroll
@@ -213,7 +263,7 @@ async function fetchWithPuppeteer(url: string, retries = 2): Promise<string | nu
         await page.evaluate(() => {
           window.scrollTo(0, document.body.scrollHeight);
         });
-        await delay(1000);
+        await randomDelay();
         
         // Check if content height increased (more content loaded)
         const newHeight = await page.evaluate(() => document.body.scrollHeight);
@@ -239,7 +289,7 @@ async function fetchWithPuppeteer(url: string, retries = 2): Promise<string | nu
         continue;
       }
 
-      return html;
+      return { html, finalUrl };
     } catch (error) {
       lastError = error instanceof Error ? error : new Error(String(error));
       if (attempt === retries) {
@@ -286,7 +336,7 @@ function isValidScholarshipUrl(url: string, name: string): boolean {
   return true;
 }
 
-async function fetchWithRetry(url: string, retries = 2): Promise<string | null> {
+async function fetchWithRetry(url: string, retries = 2): Promise<{ html: string; finalUrl: string } | null> {
   for (let i = 0; i <= retries; i++) {
     try {
       const response = await fetch(url, {
@@ -297,6 +347,7 @@ async function fetchWithRetry(url: string, retries = 2): Promise<string | null> 
             'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.5',
         },
+        redirect: 'follow', // Follow redirects
       });
 
       if (!response.ok) {
@@ -304,17 +355,21 @@ async function fetchWithRetry(url: string, retries = 2): Promise<string | null> 
           console.error(`Failed to fetch ${url}: ${response.status}`);
           return null;
         }
-        await delay(1000);
+        await randomDelay();
         continue;
       }
 
-      return await response.text();
+      // response.url contains the final URL after redirects
+      const finalUrl = response.url;
+      const html = await response.text();
+
+      return { html, finalUrl };
     } catch (error) {
       if (i === retries) {
         console.error(`Error fetching ${url}:`, error);
         return null;
       }
-      await delay(1000);
+      await randomDelay();
     }
   }
   return null;
@@ -349,71 +404,31 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     );
 
-    // Step 1: Go to main scholarships page
-    console.log('Bold.org: Navigating to main page...');
-    await pageInstance.goto('https://bold.org/scholarships/', { waitUntil: 'networkidle2', timeout: 30000 });
-    await delay(3000);
-
-    // Step 2: Click "Explore Bold.org Scholarships" button
-    console.log('Bold.org: Looking for "Explore Bold.org Scholarships" button...');
-    // #region agent log
-    fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Looking for Explore button',data:{},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'I'})}).catch(()=>{});
-    // #endregion
-    
-    const exploreButtonInfo = await pageInstance.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="button"]'));
-      const matching = buttons.filter((btn: any) => {
-        const text = btn.textContent?.toLowerCase() || '';
-        return text.includes('explore') && text.includes('scholarships');
-      });
-      return {
-        found: matching.length > 0,
-        count: matching.length,
-        texts: matching.slice(0, 3).map((b: any) => b.textContent?.trim().substring(0, 50))
-      };
-    });
-    
-    console.log(`Bold.org: Explore button search results: found=${exploreButtonInfo.found}, count=${exploreButtonInfo.count}`);
-    if (exploreButtonInfo.texts.length > 0) {
-      console.log(`Bold.org: Button texts found: ${exploreButtonInfo.texts.join(', ')}`);
-    }
-    
-    const exploreButton = await pageInstance.evaluateHandle(() => {
-      const buttons = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="button"]'));
-      return buttons.find((btn: any) => {
-        const text = btn.textContent?.toLowerCase() || '';
-        return text.includes('explore') && text.includes('scholarships');
-      });
-    });
-
-    if (exploreButton && exploreButton.asElement()) {
-      try {
-        await (exploreButton.asElement() as any).click();
-        console.log('Bold.org: Clicked "Explore Bold.org Scholarships" button');
-        // #region agent log
-        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Explore button clicked',data:{},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
-        await delay(3000); // Wait for interface to load
-      } catch (err) {
-        console.error('Bold.org: Error clicking Explore button:', err);
-      }
-    } else {
-      console.log('Bold.org: "Explore" button not found, may already be on the right page');
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Explore button not found',data:{},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'I'})}).catch(()=>{});
-      // #endregion
-    }
-
-    // Now scrape pages using "Next Page" buttons
+    // Navigate directly to paginated URLs
     for (let page = 1; page <= maxPages; page++) {
       // #region agent log
       fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Scraping page',data:{page},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'F'})}).catch(()=>{});
       // #endregion
 
-      console.log(`Bold.org: Scraping page ${page}...`);
+      // Build URL for this page
+      const url = page === 1 
+        ? 'https://bold.org/scholarships/' 
+        : `https://bold.org/scholarships/${page}/`;
+
+      console.log(`Bold.org: Navigating to page ${page} (${url})...`);
       
-      // Wait a bit for content to load
-      await delay(2000);
+      // Navigate to the page
+      await pageInstance.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+      
+      // Wait for content with random delay
+      await randomDelay();
+      
+      // Check for redirect detection
+      const finalUrl = pageInstance.url();
+      if (checkRedirect(url, finalUrl, page, 'Bold.org')) {
+        console.warn(`Bold.org: Stopping due to redirect detection on page ${page}`);
+        break;
+      }
       
       // Get HTML content
       const html = await pageInstance.content();
@@ -544,6 +559,13 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
       console.log(`Bold.org page ${page}: Processed ${processedCount} links, filtered out ${filteredCount}, found ${foundOnPage} valid scholarships`);
     }
 
+    // Content verification: Log first 3 scholarship names found on this page
+    const pageScholarships = scholarships.slice(-foundOnPage); // Get scholarships added on this page
+    if (pageScholarships.length > 0) {
+      const firstThree = pageScholarships.slice(0, 3).map(s => s.name);
+      console.log(`Bold.org page ${page}: First 3 scholarships: ${firstThree.join(', ')}`);
+    }
+
     totalPagesScanned++;
     console.log(`Bold.org page ${page}: Found ${foundOnPage} scholarships (${newOnPage} new, ${foundOnPage - newOnPage} duplicates)`);
     
@@ -572,7 +594,7 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
       }
       // Reset duplicate counter when we hit an empty page (it's not a duplicate page)
       consecutiveDuplicatePages = 0;
-      await delay(1000);
+      await randomDelay();
       continue; // Skip to next page
     } else {
       consecutiveEmptyPages = 0; // Reset empty page counter when we find scholarships
@@ -604,97 +626,8 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
       // #endregion
     }
 
-    // Try to click "Next Page" button for pagination (only if not on last page)
-    if (page < maxPages) {
-      const nextPageButtonInfo = await pageInstance.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="button"], [class*="pagination"]'));
-        const matching = buttons.filter((btn: any) => {
-          const text = btn.textContent?.toLowerCase() || '';
-          const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
-          return text.includes('next') || text.includes('next page') || 
-                 ariaLabel.includes('next') ||
-                 (btn.classList && (Array.from(btn.classList) as string[]).some((c: string) => c.toLowerCase().includes('next')));
-        });
-        return {
-          found: matching.length > 0,
-          count: matching.length,
-          texts: matching.slice(0, 3).map((b: any) => b.textContent?.trim().substring(0, 50))
-        };
-      });
-      
-      console.log(`Bold.org page ${page}: Next Page button search - found=${nextPageButtonInfo.found}, count=${nextPageButtonInfo.count}`);
-      if (nextPageButtonInfo.texts.length > 0) {
-        console.log(`Bold.org: Next button texts: ${nextPageButtonInfo.texts.join(', ')}`);
-      }
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Next Page button search',data:{page,found:nextPageButtonInfo.found,count:nextPageButtonInfo.count,texts:nextPageButtonInfo.texts},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'J'})}).catch(()=>{});
-      // #endregion
-      
-      const nextPageButton = await pageInstance.evaluateHandle(() => {
-        const buttons = Array.from(document.querySelectorAll('button, a, [role="button"], [class*="button"], [class*="pagination"]'));
-        return buttons.find((btn: any) => {
-          const text = btn.textContent?.toLowerCase() || '';
-          const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
-          return text.includes('next') || text.includes('next page') || 
-                 ariaLabel.includes('next') ||
-                 (btn.classList && (Array.from(btn.classList) as string[]).some((c: string) => c.toLowerCase().includes('next')));
-        });
-      });
-
-      if (nextPageButton && nextPageButton.asElement()) {
-        try {
-          // Get current URL before clicking
-          const urlBefore = await pageInstance.url();
-          const linkCountBefore = await pageInstance.evaluate(() => {
-            return document.querySelectorAll('a[href*="/scholarships/"]').length;
-          });
-          
-          await (nextPageButton.asElement() as any).click();
-          console.log(`Bold.org: Clicked "Next Page" button to go to page ${page + 1}`);
-          
-          // Wait for navigation
-          await delay(3000);
-          
-          // Check if page actually changed
-          const urlAfter = await pageInstance.url();
-          const linkCountAfter = await pageInstance.evaluate(() => {
-            return document.querySelectorAll('a[href*="/scholarships/"]').length;
-          });
-          
-          console.log(`Bold.org: After Next Page click - URL changed: ${urlBefore !== urlAfter}, Link count: ${linkCountBefore} -> ${linkCountAfter}`);
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Next Page button clicked',data:{page,nextPage:page+1,urlBefore,urlAfter,urlChanged:urlBefore!==urlAfter,linkCountBefore,linkCountAfter},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'J'})}).catch(()=>{});
-          // #endregion
-          
-          // If page didn't change and links are the same, we've probably reached the end
-          if (urlBefore === urlAfter && linkCountBefore === linkCountAfter) {
-            console.log(`Bold.org: Page didn't change after clicking Next, probably reached the end`);
-            break;
-          }
-        } catch (err) {
-          console.log(`Bold.org: Failed to click Next Page button: ${err}`);
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Next Page button click failed',data:{page,error:err instanceof Error ? err.message : String(err)},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'J'})}).catch(()=>{});
-          // #endregion
-          // If we can't click next, we've probably reached the end
-          break;
-        }
-      } else {
-        console.log(`Bold.org: No "Next Page" button found on page ${page}, may have reached the end`);
-        // #region agent log
-        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:scrapeBold',message:'Next Page button not found',data:{page},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'J'})}).catch(()=>{});
-        // #endregion
-        // Only break if we found no scholarships AND no next button
-        if (foundOnPage === 0) {
-          break;
-        }
-      }
-    }
-
     // Rate limiting between pages
-    await delay(1000);
+    await randomDelay();
   }
 
   await pageInstance.close();
@@ -714,15 +647,26 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
 async function scrapeBoldFallback(maxPages: number = 10, existingUrls: Set<string> = new Set()): Promise<DiscoveredScholarship[]> {
   // Use the old URL-based pagination method as fallback
   const scholarships: DiscoveredScholarship[] = [];
+  let foundOnPage = 0;
   
   for (let page = 1; page <= maxPages; page++) {
     const url = page === 1 
       ? 'https://bold.org/scholarships/' 
-      : `https://bold.org/scholarships/?page=${page}`;
+      : `https://bold.org/scholarships/${page}/`;
     
-    const html = await fetchWithRetry(url);
-    if (!html) break;
+    const result = await fetchWithRetry(url);
+    if (!result) break;
     
+    const html = result.html;
+    const finalUrl = result.finalUrl;
+    
+    // Check for redirect detection
+    if (checkRedirect(url, finalUrl, page, 'Bold.org')) {
+      console.warn(`Bold.org (fallback): Stopping due to redirect detection on page ${page}`);
+      break;
+    }
+    
+    foundOnPage = 0;
     const $ = cheerio.load(html);
     $('a[href*="/scholarships/"]').each((_, element) => {
       const href = $(element).attr('href');
@@ -740,13 +684,21 @@ async function scrapeBoldFallback(maxPages: number = 10, existingUrls: Set<strin
           
           if (isValidScholarshipUrl(fullUrl, name)) {
             scholarships.push({ url: fullUrl, name: name.substring(0, 100), source: 'Bold.org' });
+            foundOnPage++;
           }
         }
       }
     });
     
-    if (scholarships.length === 0 && page > 1) break;
-    await delay(1000);
+    // Content verification: Log first 3 scholarship names found on this page
+    const pageScholarships = scholarships.slice(-foundOnPage);
+    if (pageScholarships.length > 0) {
+      const firstThree = pageScholarships.slice(0, 3).map(s => s.name);
+      console.log(`Bold.org (fallback) page ${page}: First 3 scholarships: ${firstThree.join(', ')}`);
+    }
+    
+    if (foundOnPage === 0 && page > 1) break;
+    await randomDelay();
   }
   
   return scholarships;
@@ -765,16 +717,29 @@ async function scrapeScholarships360(maxPages: number = 10, existingUrls: Set<st
 
   for (let page = 1; page <= maxPages; page++) {
     const url = page === 1
-      ? 'https://scholarships360.org/scholarships/'
-      : `https://scholarships360.org/scholarships/page/${page}/`;
+      ? 'https://scholarships360.org/scholarships/search/'
+      : `https://scholarships360.org/scholarships/search/?search=&sidebar_academic_interest=&sidebar_state=&sidebar_grade=&sidebar_background=&sidebar_sort=relevant&current_page=${page}`;
     
     // Use Puppeteer for Scholarships360 (JavaScript-rendered pagination)
-    let html = await fetchWithPuppeteer(url);
+    let result = await fetchWithPuppeteer(url);
+    let html: string | null = null;
+    let finalUrl: string = url;
     
     // If Puppeteer fails, fall back to regular fetch
-    if (!html || html.length < 100) {
+    if (!result || result.html.length < 100) {
       console.log(`Scholarships360: Puppeteer failed for page ${page}, trying regular fetch`);
-      html = await fetchWithRetry(url);
+      result = await fetchWithRetry(url);
+    }
+    
+    if (result) {
+      html = result.html;
+      finalUrl = result.finalUrl;
+    }
+    
+    // Check for redirect detection
+    if (html && checkRedirect(url, finalUrl, page, 'Scholarships360')) {
+      console.warn(`Scholarships360: Stopping due to redirect detection on page ${page}`);
+      break;
     }
     
     if (!html) {
@@ -783,7 +748,7 @@ async function scrapeScholarships360(maxPages: number = 10, existingUrls: Set<st
       if (consecutiveEmptyPages >= maxConsecutiveEmptyPages) {
         break;
       }
-      await delay(1000);
+      await randomDelay();
       continue;
     }
 
@@ -840,6 +805,13 @@ async function scrapeScholarships360(maxPages: number = 10, existingUrls: Set<st
       }
     });
 
+    // Content verification: Log first 3 scholarship names found on this page
+    const pageScholarships = scholarships.slice(-foundOnPage); // Get scholarships added on this page
+    if (pageScholarships.length > 0) {
+      const firstThree = pageScholarships.slice(0, 3).map(s => s.name);
+      console.log(`Scholarships360 page ${page}: First 3 scholarships: ${firstThree.join(', ')}`);
+    }
+
     totalPagesScanned++;
     console.log(`Scholarships360 page ${page}: Found ${foundOnPage} scholarships (${newOnPage} new, ${foundOnPage - newOnPage} duplicates)`);
     
@@ -854,7 +826,7 @@ async function scrapeScholarships360(maxPages: number = 10, existingUrls: Set<st
       }
       // Reset duplicate counter when we hit an empty page
       consecutiveDuplicatePages = 0;
-      await delay(1000);
+      await randomDelay();
       continue; // Skip to next page
     } else {
       consecutiveEmptyPages = 0; // Reset empty page counter when we find scholarships
@@ -876,7 +848,7 @@ async function scrapeScholarships360(maxPages: number = 10, existingUrls: Set<st
       console.log(`Scholarships360: Found ${newOnPage} NEW scholarships on page ${page} (${totalNewFound} total new so far)`);
     }
 
-    await delay(1000);
+    await randomDelay();
   }
 
   console.log(`Scholarships360 scrape complete: Scanned ${totalPagesScanned} pages, found ${scholarships.length} total scholarships (${totalNewFound} new, ${scholarships.length - totalNewFound} duplicates)`);
@@ -896,9 +868,18 @@ async function scrapeScholarshipsCom(maxPages: number = 10, existingUrls: Set<st
       ? 'https://www.scholarships.com/financial-aid/college-scholarships/scholarship-directory'
       : `https://www.scholarships.com/financial-aid/college-scholarships/scholarship-directory?page=${page}`;
     
-    const html = await fetchWithRetry(url);
-    if (!html) {
+    const result = await fetchWithRetry(url);
+    if (!result) {
       console.log(`Scholarships.com: Failed to fetch page ${page}`);
+      break;
+    }
+    
+    const html = result.html;
+    const finalUrl = result.finalUrl;
+    
+    // Check for redirect detection
+    if (checkRedirect(url, finalUrl, page, 'Scholarships.com')) {
+      console.warn(`Scholarships.com: Stopping due to redirect detection on page ${page}`);
       break;
     }
 
@@ -979,6 +960,13 @@ async function scrapeScholarshipsCom(maxPages: number = 10, existingUrls: Set<st
       }
     });
 
+    // Content verification: Log first 3 scholarship names found on this page
+    const pageScholarships = scholarships.slice(-foundOnPage); // Get scholarships added on this page
+    if (pageScholarships.length > 0) {
+      const firstThree = pageScholarships.slice(0, 3).map(s => s.name);
+      console.log(`Scholarships.com page ${page}: First 3 scholarships: ${firstThree.join(', ')}`);
+    }
+
     console.log(`Scholarships.com page ${page}: Found ${foundOnPage} scholarships (${newOnPage} new)`);
     
     if (foundOnPage === 0) {
@@ -1002,7 +990,7 @@ async function scrapeScholarshipsCom(maxPages: number = 10, existingUrls: Set<st
       console.log(`Scholarships.com: Found ${newOnPage} NEW scholarships on page ${page} (${totalNewFound} total new so far)`);
     }
 
-    await delay(1000);
+    await randomDelay();
   }
 
   return scholarships;
@@ -1130,12 +1118,13 @@ async function scrapeGenericSource(source: ScholarshipSource, maxPages: number =
   const scholarships: DiscoveredScholarship[] = [];
   let newCount = 0;
   
-  const html = await fetchWithRetry(source.searchUrl);
-  if (!html) {
+  const result = await fetchWithRetry(source.searchUrl);
+  if (!result) {
     console.log(`${source.name}: Failed to fetch`);
     return scholarships;
   }
 
+  const html = result.html;
   const $ = cheerio.load(html);
   
   // Generic approach: find all links that might be scholarships
