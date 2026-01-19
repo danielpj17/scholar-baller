@@ -613,7 +613,7 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
           const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
           return text.includes('next') || text.includes('next page') || 
                  ariaLabel.includes('next') ||
-                 (btn.classList && Array.from(btn.classList).some((c: string) => c.toLowerCase().includes('next')));
+                 (btn.classList && (Array.from(btn.classList) as string[]).some((c: string) => c.toLowerCase().includes('next')));
         });
         return {
           found: matching.length > 0,
@@ -638,7 +638,7 @@ async function scrapeBold(maxPages: number = 10, existingUrls: Set<string> = new
           const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
           return text.includes('next') || text.includes('next page') || 
                  ariaLabel.includes('next') ||
-                 (btn.classList && Array.from(btn.classList).some((c: string) => c.toLowerCase().includes('next')));
+                 (btn.classList && (Array.from(btn.classList) as string[]).some((c: string) => c.toLowerCase().includes('next')));
         });
       });
 
