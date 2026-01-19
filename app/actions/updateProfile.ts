@@ -58,11 +58,11 @@ Respond with ONLY the JSON object.`;
 
     // Try models in order
     const models = [
-      'gemini-2.5-flash',
-      'gemini-2.5-pro',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
+      'models/gemini-2.5-flash',
+      'models/gemini-flash-latest',
+      'models/gemini-2.0-flash',
+      'models/gemini-pro-latest',
+      'models/gemini-2.5-pro',
     ];
 
     let responseText = '';

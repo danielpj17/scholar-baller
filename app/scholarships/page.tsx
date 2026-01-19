@@ -2,12 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Scholarship, EligibilityStatus } from '@/types';
+import { Scholarship, EligibilityStatus, GenerationPreference } from '@/types';
 import { 
   getAllScholarships, 
   toggleSaved, 
   markAsApplied,
-  getScholarshipCounts 
+  getScholarshipCounts,
+  updateGenerationPreference
 } from '@/app/actions/scholarshipActions';
 import { generateEssay } from '@/app/actions/generateEssay';
 
@@ -56,9 +57,9 @@ export default function AllScholarshipsPage() {
     }
   };
 
-  const handleGenerateEssay = async (id: string) => {
+  const handleGenerateEssay = async (id: string, mode: GenerationPreference) => {
     setGeneratingEssayId(id);
-    const result = await generateEssay(id);
+    const result = await generateEssay(id, mode);
     
     if (result.success && result.essay) {
       setScholarships((prev) =>
@@ -81,6 +82,15 @@ export default function AllScholarshipsPage() {
     } catch {
       console.error('Failed to copy essay');
     }
+  };
+
+  const handleGenerationPreferenceChange = async (id: string, preference: GenerationPreference) => {
+    // Update local state immediately for responsiveness
+    setScholarships((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, generationPreference: preference } : s))
+    );
+    // Persist to database
+    await updateGenerationPreference(id, preference);
   };
 
   const getRowClass = (scholarship: Scholarship) => {
@@ -297,6 +307,65 @@ export default function AllScholarshipsPage() {
                       {/* Essay */}
                       <td>
                         <div className="space-y-2">
+                          {/* AI Policy Badge & Generation Mode Dropdown */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {/* AI Policy Badge */}
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium"
+                              style={{
+                                background: scholarship.aiPolicy === 'Prohibited' 
+                                  ? 'var(--danger-bg)' 
+                                  : scholarship.aiPolicy === 'Safe' 
+                                    ? 'var(--success-bg)' 
+                                    : 'var(--warning-bg)',
+                                border: `1px solid ${
+                                  scholarship.aiPolicy === 'Prohibited' 
+                                    ? 'var(--danger-border)' 
+                                    : scholarship.aiPolicy === 'Safe' 
+                                      ? 'var(--success-border)' 
+                                      : 'var(--warning-border)'
+                                }`,
+                                color: scholarship.aiPolicy === 'Prohibited' 
+                                  ? 'var(--danger)' 
+                                  : scholarship.aiPolicy === 'Safe' 
+                                    ? 'var(--success)' 
+                                    : 'var(--warning)',
+                              }}
+                              title={
+                                scholarship.aiPolicy === 'Prohibited'
+                                  ? 'This scholarship prohibits AI-generated essays'
+                                  : scholarship.aiPolicy === 'Safe'
+                                    ? 'AI-generated essays appear to be allowed'
+                                    : 'AI policy is unclear for this scholarship'
+                              }
+                            >
+                              {scholarship.aiPolicy === 'Prohibited' ? '⛔' : scholarship.aiPolicy === 'Safe' ? '✅' : '❓'}
+                              {scholarship.aiPolicy === 'Prohibited' ? 'AI Prohibited' : scholarship.aiPolicy === 'Safe' ? 'AI Allowed' : 'AI Unsure'}
+                            </span>
+
+                            {/* Generation Mode Dropdown */}
+                            {scholarship.essayPrompt && (
+                              <select
+                                value={scholarship.generationPreference}
+                                onChange={(e) => handleGenerationPreferenceChange(scholarship.id, e.target.value as GenerationPreference)}
+                                className="px-2 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer"
+                                style={{
+                                  background: 'var(--background)',
+                                  border: '1px solid var(--border)',
+                                  color: 'var(--foreground)',
+                                }}
+                              >
+                                <option value="Outline">Generate Outline</option>
+                                <option 
+                                  value="Full Draft" 
+                                  disabled={scholarship.aiPolicy === 'Prohibited'}
+                                >
+                                  Generate Full Draft {scholarship.aiPolicy === 'Prohibited' ? '(Disabled)' : ''}
+                                </option>
+                              </select>
+                            )}
+                          </div>
+
                           {scholarship.draftedEssay ? (
                             <>
                               <textarea
@@ -305,36 +374,65 @@ export default function AllScholarshipsPage() {
                                 className="essay-textarea"
                                 rows={4}
                               />
-                              <button
-                                onClick={() => handleCopyEssay(scholarship.id, scholarship.draftedEssay)}
-                                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
-                                style={{
-                                  background: copiedId === scholarship.id ? 'var(--success-bg)' : 'var(--background)',
-                                  border: `1px solid ${copiedId === scholarship.id ? 'var(--success-border)' : 'var(--border)'}`,
-                                  color: copiedId === scholarship.id ? 'var(--success)' : 'var(--muted)',
-                                }}
-                              >
-                                {copiedId === scholarship.id ? (
-                                  <>
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                      <path d="M20 6L9 17l-5-5" />
-                                    </svg>
-                                    Copied!
-                                  </>
-                                ) : (
-                                  <>
-                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                                      <rect x="9" y="9" width="13" height="13" rx="2" />
-                                      <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-                                    </svg>
-                                    Copy
-                                  </>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleCopyEssay(scholarship.id, scholarship.draftedEssay)}
+                                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                                  style={{
+                                    background: copiedId === scholarship.id ? 'var(--success-bg)' : 'var(--background)',
+                                    border: `1px solid ${copiedId === scholarship.id ? 'var(--success-border)' : 'var(--border)'}`,
+                                    color: copiedId === scholarship.id ? 'var(--success)' : 'var(--muted)',
+                                  }}
+                                >
+                                  {copiedId === scholarship.id ? (
+                                    <>
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M20 6L9 17l-5-5" />
+                                      </svg>
+                                      Copied!
+                                    </>
+                                  ) : (
+                                    <>
+                                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <rect x="9" y="9" width="13" height="13" rx="2" />
+                                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                                      </svg>
+                                      Copy
+                                    </>
+                                  )}
+                                </button>
+                                {/* Regenerate button */}
+                                {scholarship.essayPrompt && (
+                                  <button
+                                    onClick={() => handleGenerateEssay(scholarship.id, scholarship.generationPreference)}
+                                    disabled={generatingEssayId === scholarship.id}
+                                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all disabled:opacity-50"
+                                    style={{
+                                      background: 'var(--background)',
+                                      border: '1px solid var(--border)',
+                                      color: 'var(--muted)',
+                                    }}
+                                  >
+                                    {generatingEssayId === scholarship.id ? (
+                                      <>
+                                        <div className="spinner" style={{ width: '12px', height: '12px' }} />
+                                        Regenerating...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                          <path d="M21 12a9 9 0 11-6.219-8.56" />
+                                        </svg>
+                                        Regenerate
+                                      </>
+                                    )}
+                                  </button>
                                 )}
-                              </button>
+                              </div>
                             </>
                           ) : scholarship.essayPrompt ? (
                             <button
-                              onClick={() => handleGenerateEssay(scholarship.id)}
+                              onClick={() => handleGenerateEssay(scholarship.id, scholarship.generationPreference)}
                               disabled={generatingEssayId === scholarship.id}
                               className="w-full px-4 py-2 rounded-lg text-sm font-medium transition-all disabled:opacity-50"
                               style={{
@@ -345,10 +443,10 @@ export default function AllScholarshipsPage() {
                               {generatingEssayId === scholarship.id ? (
                                 <>
                                   <div className="spinner inline-block mr-2" style={{ width: '14px', height: '14px' }} />
-                                  Generating...
+                                  Generating {scholarship.generationPreference}...
                                 </>
                               ) : (
-                                'Generate Essay'
+                                `Generate ${scholarship.generationPreference}`
                               )}
                             </button>
                           ) : (

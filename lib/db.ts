@@ -1,4 +1,5 @@
 import { neon } from '@neondatabase/serverless';
+import { ScholarshipSource } from '@/constants/sources';
 
 // Handle missing DATABASE_URL gracefully for build time
 const connectionString = process.env.DATABASE_URL || '';
@@ -37,9 +38,22 @@ export async function initializeDatabase() {
         drafted_essay TEXT,
         is_saved BOOLEAN DEFAULT false,
         is_applied BOOLEAN DEFAULT false,
+        ai_policy TEXT DEFAULT 'Unsure',
+        generation_preference TEXT DEFAULT 'Full Draft',
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       )
+    `;
+
+    // Add missing columns if they don't exist (for existing tables)
+    await sql`
+      ALTER TABLE scholarships 
+      ADD COLUMN IF NOT EXISTS ai_policy TEXT DEFAULT 'Unsure'
+    `;
+    
+    await sql`
+      ALTER TABLE scholarships 
+      ADD COLUMN IF NOT EXISTS generation_preference TEXT DEFAULT 'Full Draft'
     `;
 
     // Create user_profiles table
@@ -47,6 +61,19 @@ export async function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS user_profiles (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         profile_data JSONB NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        updated_at TIMESTAMP DEFAULT NOW()
+      )
+    `;
+
+    // Create custom_sources table for user-defined scholarship sources
+    await sql`
+      CREATE TABLE IF NOT EXISTS custom_sources (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        search_url TEXT NOT NULL,
+        enabled BOOLEAN DEFAULT true,
         created_at TIMESTAMP DEFAULT NOW(),
         updated_at TIMESTAMP DEFAULT NOW()
       )
@@ -102,5 +129,115 @@ export async function getAllScholarshipUrls(): Promise<string[]> {
   } catch (error) {
     console.error('Error fetching scholarship URLs:', error);
     return [];
+  }
+}
+
+// Custom Sources CRUD operations
+export async function getCustomSources(): Promise<ScholarshipSource[]> {
+  try {
+    const result = await sql`
+      SELECT id, name, base_url, search_url, enabled 
+      FROM custom_sources 
+      ORDER BY created_at DESC
+    ` as any[];
+    return result.map((row: any) => ({
+      id: row.id,
+      name: row.name,
+      baseUrl: row.base_url,
+      searchUrl: row.search_url,
+      enabled: row.enabled,
+    }));
+  } catch (error) {
+    console.error('Error fetching custom sources:', error);
+    return [];
+  }
+}
+
+export async function addCustomSource(source: {
+  name: string;
+  baseUrl: string;
+  searchUrl: string;
+}): Promise<{ success: boolean; id?: string; error?: string }> {
+  try {
+    // Generate a unique ID
+    const id = `custom-${Date.now()}`;
+    
+    await sql`
+      INSERT INTO custom_sources (id, name, base_url, search_url, enabled)
+      VALUES (${id}, ${source.name}, ${source.baseUrl}, ${source.searchUrl}, true)
+    `;
+    
+    return { success: true, id };
+  } catch (error) {
+    console.error('Error adding custom source:', error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
+  }
+}
+
+export async function updateCustomSource(
+  id: string, 
+  updates: Partial<{ name: string; baseUrl: string; searchUrl: string; enabled: boolean }>
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    // Build dynamic update query
+    const setClauses: string[] = [];
+    const values: any[] = [];
+    
+    if (updates.name !== undefined) {
+      await sql`UPDATE custom_sources SET name = ${updates.name}, updated_at = NOW() WHERE id = ${id}`;
+    }
+    if (updates.baseUrl !== undefined) {
+      await sql`UPDATE custom_sources SET base_url = ${updates.baseUrl}, updated_at = NOW() WHERE id = ${id}`;
+    }
+    if (updates.searchUrl !== undefined) {
+      await sql`UPDATE custom_sources SET search_url = ${updates.searchUrl}, updated_at = NOW() WHERE id = ${id}`;
+    }
+    if (updates.enabled !== undefined) {
+      await sql`UPDATE custom_sources SET enabled = ${updates.enabled}, updated_at = NOW() WHERE id = ${id}`;
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('Error updating custom source:', error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
+  }
+}
+
+export async function deleteCustomSource(id: string): Promise<{ success: boolean; error?: string }> {
+  try {
+    await sql`DELETE FROM custom_sources WHERE id = ${id}`;
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting custom source:', error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
+  }
+}
+
+export async function toggleCustomSourceEnabled(id: string): Promise<{ success: boolean; enabled?: boolean; error?: string }> {
+  try {
+    const current = await sql`SELECT enabled FROM custom_sources WHERE id = ${id}` as any[];
+    if (current.length === 0) {
+      return { success: false, error: 'Source not found' };
+    }
+    
+    const newEnabled = !current[0].enabled;
+    await sql`UPDATE custom_sources SET enabled = ${newEnabled}, updated_at = NOW() WHERE id = ${id}`;
+    
+    return { success: true, enabled: newEnabled };
+  } catch (error) {
+    console.error('Error toggling custom source:', error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
   }
 }

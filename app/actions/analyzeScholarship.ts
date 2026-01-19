@@ -2,56 +2,115 @@
 
 import * as cheerio from 'cheerio';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { Scholarship, UserProfile, EligibilityStatus } from '@/types';
+import { Scholarship, UserProfile, EligibilityStatus, AIPolicy, GenerationPreference } from '@/types';
 
 const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || '';
+
+if (!apiKey) {
+  console.error('⚠️ WARNING: No Gemini API key found! Set GOOGLE_GENERATIVE_AI_API_KEY in .env.local');
+}
+
 const genAI = new GoogleGenerativeAI(apiKey);
 
-async function scrapeWebpage(url: string): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-  });
+async function scrapeWebpage(url: string, retries: number = 2): Promise<string> {
+  let lastError: Error | null = null;
 
-  if (!response.ok) {
-    throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
-  }
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      if (attempt > 0) {
+        // Wait before retry (exponential backoff)
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+        console.log(`Retry ${attempt}/${retries} for ${url} after ${delay}ms`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
 
-  const html = await response.text();
-  const $ = cheerio.load(html);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
 
-  // Remove script, style, nav, footer, and other non-content elements
-  $('script, style, nav, footer, header, aside, iframe, noscript').remove();
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+          'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+          'Sec-Ch-Ua-Mobile': '?0',
+          'Sec-Ch-Ua-Platform': '"Windows"',
+          'Sec-Fetch-Dest': 'document',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'none',
+          'Sec-Fetch-User': '?1',
+          'Upgrade-Insecure-Requests': '1',
+        },
+      });
 
-  // Extract main content - try common content selectors first
-  let content = '';
-  const contentSelectors = ['main', 'article', '[role="main"]', '.content', '#content', '.post', '.entry'];
+      clearTimeout(timeoutId);
 
-  for (const selector of contentSelectors) {
-    const element = $(selector);
-    if (element.length > 0) {
-      content = element.text();
-      break;
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
+        if (response.status === 403 || response.status === 429) {
+          // Rate limited or blocked, don't retry immediately
+          throw error;
+        }
+        lastError = error;
+        continue;
+      }
+
+      const html = await response.text();
+      
+      if (!html || html.length < 100) {
+        lastError = new Error('Page content too short or empty');
+        continue;
+      }
+
+      // Success! Parse and return content
+      const $ = cheerio.load(html);
+
+      // Remove script, style, nav, footer, and other non-content elements
+      $('script, style, nav, footer, header, aside, iframe, noscript').remove();
+
+      // Extract main content - try common content selectors first
+      let content = '';
+      const contentSelectors = ['main', 'article', '[role="main"]', '.content', '#content', '.post', '.entry'];
+
+      for (const selector of contentSelectors) {
+        const element = $(selector);
+        if (element.length > 0) {
+          content = element.text();
+          break;
+        }
+      }
+
+      // Fallback to body if no main content found
+      if (!content) {
+        content = $('body').text();
+      }
+
+      // Clean up whitespace
+      content = content.replace(/\s+/g, ' ').trim();
+
+      // Limit content length to avoid token limits
+      const maxLength = 8000;
+      if (content.length > maxLength) {
+        content = content.substring(0, maxLength) + '...';
+      }
+
+      return content;
+      
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt === retries) {
+        console.error(`Failed to scrape ${url} after ${retries + 1} attempts:`, lastError.message);
+      }
     }
   }
-
-  // Fallback to body if no main content found
-  if (!content) {
-    content = $('body').text();
-  }
-
-  // Clean up whitespace
-  content = content.replace(/\s+/g, ' ').trim();
-
-  // Limit content length to avoid token limits
-  const maxLength = 8000;
-  if (content.length > maxLength) {
-    content = content.substring(0, maxLength) + '...';
-  }
-
-  return content;
+  
+  // All retries failed
+  throw lastError || new Error('Failed to scrape webpage');
 }
 
 type AnalyzeScholarshipResult = 
@@ -63,6 +122,37 @@ export async function analyzeScholarship(
   userProfile: UserProfile
 ): Promise<AnalyzeScholarshipResult> {
   try {
+    // Validate URL - skip category/index pages
+    const urlLower = url.toLowerCase();
+    if (
+      urlLower.includes('/by-demographics/') ||
+      urlLower.includes('/by-state/') ||
+      urlLower.includes('/by-field/') ||
+      urlLower.includes('/by-type/') ||
+      urlLower.includes('/by-year/') ||
+      urlLower.includes('/category/') ||
+      urlLower.includes('/tag/') ||
+      urlLower.endsWith('/seniors/') ||
+      urlLower.endsWith('/juniors/') ||
+      urlLower.endsWith('/high-school/') ||
+      urlLower.endsWith('/women/') ||
+      urlLower.endsWith('/men/') ||
+      urlLower.match(/\/[a-z-]+-scholarships\/?$/)
+    ) {
+      return {
+        success: false,
+        error: 'URL appears to be a category/index page, not a scholarship detail page',
+      };
+    }
+    
+    // Skip external affiliate/tracking links
+    if (urlLower.includes('utm_source=') || urlLower.includes('utm_medium=')) {
+      return {
+        success: false,
+        error: 'External affiliate link, skipping',
+      };
+    }
+    
     // Step 1: Scrape the webpage
     const scrapedContent = await scrapeWebpage(url);
 
@@ -96,8 +186,22 @@ You must respond with ONLY a valid JSON object (no markdown, no code blocks, no 
   "aiAnalysis": "string - 2-3 sentence explanation of why this scholarship fits or doesn't fit the student",
   "questionsForUser": ["array of clarifying questions needed to determine eligibility"],
   "essayPrompt": "string - the essay prompt if found, otherwise empty string",
-  "draftedEssay": "string - a ~300 word draft essay answering the prompt using the student's experiences"
+  "draftedEssay": "string - a ~300 word draft essay answering the prompt using the student's experiences",
+  "aiPolicy": "Safe" | "Prohibited" | "Unsure"
 }
+
+AI POLICY DETECTION (CRITICAL):
+Carefully scan the scholarship text for ANY language that prohibits or restricts AI-generated content. Look for phrases like:
+- "no AI", "no artificial intelligence", "AI-free", "without AI assistance"
+- "must be written by the student", "written by student without assistance"
+- "zero tolerance for AI", "AI-generated content will be disqualified"
+- "hand-written", "handwritten", "in your own words"
+- "original work only", "no AI tools", "no ChatGPT", "no machine-generated"
+- "authentic student voice", "plagiarism includes AI", "AI detection"
+
+If ANY such language is found, set aiPolicy to "Prohibited".
+If you're uncertain whether AI is allowed, set aiPolicy to "Unsure".
+If no restrictions are mentioned and AI appears to be allowed, set aiPolicy to "Safe".
 
 Guidelines for analysis:
 - fitScore should reflect how well the student's profile matches the scholarship requirements
@@ -151,15 +255,13 @@ ${scrapedContent}
 Respond with ONLY the JSON object, no additional text, no markdown formatting, no code blocks.`;
 
     // Step 4: Call Gemini API (try models in order of preference)
+    // Using models that exist with your API key
     const models = [
-      'gemini-3-flash',
-      'gemini-3.0-flash', 
-      'gemini-2.5-flash',
-      'gemini-2.5-pro',
-      'gemini-2.0-flash',
-      'gemini-3-pro',
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
+      'models/gemini-2.5-flash',
+      'models/gemini-flash-latest',
+      'models/gemini-2.0-flash',
+      'models/gemini-pro-latest',
+      'models/gemini-2.5-pro',
     ];
     let responseText = '';
     let lastError: Error | null = null;
@@ -171,11 +273,12 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
         const response = await result.response;
         responseText = response.text();
         if (responseText) {
-          console.log(`Successfully used model: ${modelName}`);
+          console.log(`✓ Successfully used model: ${modelName}`);
           break;
         }
       } catch (err) {
-        console.log(`Model ${modelName} failed, trying next...`);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.log(`✗ Model ${modelName} failed: ${errorMsg.substring(0, 100)}`);
         lastError = err instanceof Error ? err : new Error(String(err));
         continue;
       }
@@ -208,6 +311,7 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
     const analysisResult = JSON.parse(cleanedResponse);
 
     // Step 6: Construct the full Scholarship object
+    const aiPolicy = parseAIPolicy(analysisResult.aiPolicy);
     const scholarship: Scholarship = {
       id: `sch-${Date.now()}`,
       name: analysisResult.name || 'Unknown Scholarship',
@@ -221,6 +325,8 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
       questionsForUser: analysisResult.questionsForUser || [],
       essayPrompt: analysisResult.essayPrompt || '',
       draftedEssay: analysisResult.draftedEssay || '',
+      aiPolicy: aiPolicy,
+      generationPreference: aiPolicy === 'Prohibited' ? 'Outline' : 'Full Draft',
     };
 
     return {
@@ -229,9 +335,28 @@ Respond with ONLY the JSON object, no additional text, no markdown formatting, n
     };
   } catch (error) {
     console.error('Error analyzing scholarship:', error);
+    
+    let errorMessage = 'An unexpected error occurred';
+    if (error instanceof Error) {
+      errorMessage = error.message;
+      
+      // Provide more helpful error messages
+      if (errorMessage.includes('fetch')) {
+        errorMessage = 'Failed to load page (network error or blocked)';
+      } else if (errorMessage.includes('timeout')) {
+        errorMessage = 'Page took too long to load';
+      } else if (errorMessage.includes('HTTP')) {
+        errorMessage = `Page access denied: ${errorMessage}`;
+      } else if (errorMessage.includes('JSON')) {
+        errorMessage = 'AI response format error';
+      } else if (errorMessage.includes('API')) {
+        errorMessage = 'Gemini API error - check your API key and quota';
+      }
+    }
+    
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'An unexpected error occurred',
+      error: errorMessage,
     };
   }
 }
@@ -244,5 +369,16 @@ function parseEligibilityStatus(status: string): EligibilityStatus {
       return EligibilityStatus.Ineligible;
     default:
       return EligibilityStatus.Unsure;
+  }
+}
+
+function parseAIPolicy(policy: string): AIPolicy {
+  switch (policy) {
+    case 'Safe':
+      return 'Safe';
+    case 'Prohibited':
+      return 'Prohibited';
+    default:
+      return 'Unsure';
   }
 }

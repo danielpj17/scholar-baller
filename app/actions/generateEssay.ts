@@ -3,6 +3,7 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { getScholarshipById, updateEssay } from './scholarshipActions';
 import { sql } from '@/lib/db';
+import { GenerationPreference } from '@/types';
 
 const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GOOGLE_AI_API_KEY || process.env.GEMINI_API_KEY || '';
 const genAI = new GoogleGenerativeAI(apiKey);
@@ -13,7 +14,10 @@ interface GenerateEssayResult {
   error?: string;
 }
 
-export async function generateEssay(scholarshipId: string): Promise<GenerateEssayResult> {
+export async function generateEssay(
+  scholarshipId: string,
+  mode: GenerationPreference = 'Full Draft'
+): Promise<GenerateEssayResult> {
   try {
     // Fetch the scholarship from database
     const scholarship = await getScholarshipById(scholarshipId);
@@ -55,10 +59,8 @@ export async function generateEssay(scholarshipId: string): Promise<GenerateEssa
       })
       .join('\n');
 
-    // Prepare the prompt for Gemini
-    const prompt = `You are a professional scholarship essay writer. Your task is to write a compelling, personalized essay for a scholarship application.
-
-SCHOLARSHIP INFORMATION:
+    // Prepare the prompt for Gemini based on mode
+    const baseContext = `SCHOLARSHIP INFORMATION:
 - Name: ${scholarship.name}
 - Award Amount: ${scholarship.awardAmount}
 - Essay Prompt: ${scholarship.essayPrompt}
@@ -95,7 +97,11 @@ CAREER GOALS:
 - Personal Brand: ${userProfile.careerGoals.narrativeStrategy}
 
 INTERESTS & KEYWORDS:
-${userProfile.interests.join(', ')}
+${userProfile.interests.join(', ')}`;
+
+    const fullDraftInstructions = `You are a professional scholarship essay writer. Your task is to write a compelling, personalized essay for a scholarship application.
+
+${baseContext}
 
 INSTRUCTIONS:
 1. Write a compelling 300-500 word essay that directly addresses the essay prompt
@@ -110,12 +116,48 @@ INSTRUCTIONS:
 
 Write ONLY the essay text, no additional commentary or formatting.`;
 
+    const outlineInstructions = `You are a professional scholarship essay advisor. Your task is to create a detailed, structured outline that the student can use to write their own essay. DO NOT write the actual essay - only provide an outline.
+
+${baseContext}
+
+INSTRUCTIONS:
+Create a comprehensive outline for the student to write their own essay. Include:
+
+1. **THESIS STATEMENT**: A clear, compelling one-sentence thesis that directly addresses the essay prompt
+
+2. **OPENING HOOK**: 2-3 specific ideas for attention-grabbing opening sentences (questions, anecdotes, statistics, or bold statements)
+
+3. **MAIN BODY SECTIONS** (3-4 sections):
+   For each section, provide:
+   - Section topic/theme
+   - Key points to cover (bullet points)
+   - SPECIFIC anecdotes/experiences from the student's profile to reference
+   - How this connects to the scholarship's values/requirements
+
+4. **SUGGESTED TRANSITIONS**: Brief phrases to connect sections smoothly
+
+5. **CONCLUSION POINTS**:
+   - How to circle back to the thesis
+   - A memorable closing statement idea
+   - Call to action or forward-looking statement
+
+6. **WRITING TIPS**:
+   - Tone suggestions specific to this scholarship
+   - Words/phrases to include or avoid
+   - Estimated word count for each section
+
+Format this as a clear, easy-to-follow outline with headers and bullet points. Make it detailed enough that the student can write a compelling 300-500 word essay from it.`;
+
+    const prompt = mode === 'Outline' ? outlineInstructions : fullDraftInstructions;
+
     // Call Gemini API (try models in order of preference)
+    // Using models that exist with your API key
     const models = [
-      'gemini-2.0-flash-exp',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-1.5-pro',
+      'models/gemini-2.5-flash',
+      'models/gemini-flash-latest',
+      'models/gemini-2.0-flash',
+      'models/gemini-pro-latest',
+      'models/gemini-2.5-pro',
     ];
     
     let essay = '';

@@ -1,10 +1,11 @@
 'use server';
 
 import { sql } from '@/lib/db';
-import { Scholarship, EligibilityStatus } from '@/types';
+import { Scholarship, EligibilityStatus, AIPolicy, GenerationPreference } from '@/types';
 
 // Convert database row to Scholarship object
 function rowToScholarship(row: any): Scholarship {
+  const aiPolicy = parseAIPolicy(row.ai_policy);
   return {
     id: row.id,
     name: row.name,
@@ -18,6 +19,8 @@ function rowToScholarship(row: any): Scholarship {
     questionsForUser: Array.isArray(row.questions_for_user) ? row.questions_for_user : [],
     essayPrompt: row.essay_prompt || '',
     draftedEssay: row.drafted_essay || '',
+    aiPolicy: aiPolicy,
+    generationPreference: parseGenerationPreference(row.generation_preference, aiPolicy),
   };
 }
 
@@ -30,6 +33,26 @@ function parseEligibilityStatus(status: string): EligibilityStatus {
     default:
       return EligibilityStatus.Unsure;
   }
+}
+
+function parseAIPolicy(policy: string): AIPolicy {
+  switch (policy) {
+    case 'Safe':
+      return 'Safe';
+    case 'Prohibited':
+      return 'Prohibited';
+    default:
+      return 'Unsure';
+  }
+}
+
+function parseGenerationPreference(preference: string, aiPolicy: AIPolicy): GenerationPreference {
+  // If AI is prohibited, always force Outline mode
+  if (aiPolicy === 'Prohibited') {
+    return 'Outline';
+  }
+  // Otherwise respect the stored preference
+  return preference === 'Outline' ? 'Outline' : 'Full Draft';
 }
 
 // Get all scholarships sorted by fit score (highest first)
@@ -149,6 +172,24 @@ export async function updateEssay(id: string, essay: string): Promise<{ success:
   }
 }
 
+// Update generation preference
+export async function updateGenerationPreference(
+  id: string, 
+  preference: GenerationPreference
+): Promise<{ success: boolean }> {
+  try {
+    await sql`
+      UPDATE scholarships 
+      SET generation_preference = ${preference}, updated_at = NOW() 
+      WHERE id = ${id}
+    `;
+    return { success: true };
+  } catch (error) {
+    console.error('Error updating generation preference:', error);
+    return { success: false };
+  }
+}
+
 // Insert new scholarship
 export async function insertScholarship(scholarship: Scholarship): Promise<{ success: boolean; id?: string }> {
   try {
@@ -156,7 +197,7 @@ export async function insertScholarship(scholarship: Scholarship): Promise<{ suc
       INSERT INTO scholarships (
         url, name, source, deadline, award_amount, requirements,
         eligibility_status, fit_score, ai_analysis, questions_for_user,
-        essay_prompt, drafted_essay
+        essay_prompt, drafted_essay, ai_policy, generation_preference
       ) VALUES (
         ${scholarship.url},
         ${scholarship.name},
@@ -169,7 +210,9 @@ export async function insertScholarship(scholarship: Scholarship): Promise<{ suc
         ${scholarship.aiAnalysis},
         ${JSON.stringify(scholarship.questionsForUser)},
         ${scholarship.essayPrompt},
-        ${scholarship.draftedEssay}
+        ${scholarship.draftedEssay},
+        ${scholarship.aiPolicy},
+        ${scholarship.generationPreference}
       )
       ON CONFLICT (url) DO UPDATE SET
         name = EXCLUDED.name,
@@ -181,6 +224,8 @@ export async function insertScholarship(scholarship: Scholarship): Promise<{ suc
         ai_analysis = EXCLUDED.ai_analysis,
         questions_for_user = EXCLUDED.questions_for_user,
         essay_prompt = EXCLUDED.essay_prompt,
+        ai_policy = EXCLUDED.ai_policy,
+        generation_preference = EXCLUDED.generation_preference,
         updated_at = NOW()
       RETURNING id
     ` as any[];

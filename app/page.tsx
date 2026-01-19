@@ -2,12 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Scholarship, EligibilityStatus } from '@/types';
+import { Scholarship, EligibilityStatus, GenerationPreference } from '@/types';
 import { useProfile } from '@/contexts/ProfileContext';
 import { analyzeScholarship } from '@/app/actions/analyzeScholarship';
-import { discoverScholarships } from '@/app/actions/discoverScholarships';
-import { scholarshipSources } from '@/constants/sources';
-import { insertScholarship, getScholarshipCounts, getAllScholarships } from '@/app/actions/scholarshipActions';
+import { discoverScholarships, SourceStats } from '@/app/actions/discoverScholarships';
+import { scholarshipSources, ScholarshipSource } from '@/constants/sources';
+import { insertScholarship, getScholarshipCounts, getAllScholarships, updateGenerationPreference } from '@/app/actions/scholarshipActions';
+import { getAllSources, addCustomSource, deleteCustomSource } from '@/app/actions/sourceActions';
 
 export default function Dashboard() {
   const { profile, addQuestions, unansweredCount } = useProfile();
@@ -25,12 +26,28 @@ export default function Dashboard() {
     scholarshipSources.filter((s) => s.enabled).map((s) => s.id)
   );
   const [showSourceSelector, setShowSourceSelector] = useState(false);
+  const [sourceStats, setSourceStats] = useState<SourceStats[]>([]);
+  
+  // Custom source state
+  const [allSources, setAllSources] = useState<ScholarshipSource[]>(scholarshipSources);
+  const [showAddSource, setShowAddSource] = useState(false);
+  const [newSourceName, setNewSourceName] = useState('');
+  const [newSourceUrl, setNewSourceUrl] = useState('');
+  const [addingSource, setAddingSource] = useState(false);
 
-  // Load scholarships and counts on mount
+  // Load scholarships, counts, and sources on mount
   useEffect(() => {
     loadScholarships();
     loadCounts();
+    loadSources();
   }, []);
+
+  const loadSources = async () => {
+    const sources = await getAllSources();
+    setAllSources(sources);
+    // Update selected sources to include any new custom sources
+    setSelectedSources(sources.filter((s) => s.enabled).map((s) => s.id));
+  };
 
   const loadScholarships = async () => {
     const data = await getAllScholarships();
@@ -98,6 +115,59 @@ export default function Dashboard() {
     }
   };
 
+  const handleGenerationPreferenceChange = async (id: string, preference: GenerationPreference) => {
+    // Update local state immediately for responsiveness
+    setScholarships((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, generationPreference: preference } : s))
+    );
+    // Persist to database
+    await updateGenerationPreference(id, preference);
+  };
+
+  const handleAddSource = async () => {
+    if (!newSourceName.trim() || !newSourceUrl.trim()) {
+      setError('Please enter both name and URL');
+      return;
+    }
+
+    setAddingSource(true);
+    setError(null);
+
+    try {
+      // Parse the URL to get base URL
+      const url = new URL(newSourceUrl);
+      const baseUrl = `${url.protocol}//${url.hostname}`;
+      
+      const result = await addCustomSource({
+        name: newSourceName.trim(),
+        baseUrl,
+        searchUrl: newSourceUrl.trim(),
+      });
+
+      if (result.success) {
+        await loadSources();
+        setNewSourceName('');
+        setNewSourceUrl('');
+        setShowAddSource(false);
+      } else {
+        setError(result.error || 'Failed to add source');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid URL');
+    } finally {
+      setAddingSource(false);
+    }
+  };
+
+  const handleDeleteSource = async (id: string) => {
+    const result = await deleteCustomSource(id);
+    if (result.success) {
+      await loadSources();
+    } else {
+      setError(result.error || 'Failed to delete source');
+    }
+  };
+
   const handleDiscover = async () => {
     if (selectedSources.length === 0) {
       setError('Please select at least one source');
@@ -106,11 +176,16 @@ export default function Dashboard() {
 
     setIsDiscovering(true);
     setError(null);
+    setSourceStats([]);
     setDiscoveryProgress('Searching scholarship sources (scanning 5-10 pages per source)...');
 
     try {
       // Step 1: Discover scholarship URLs (with pagination and duplicate checking)
-      const discoveryResult = await discoverScholarships(profile, selectedSources, 10);
+      // Increased to 20 pages per source to find more scholarships, will stop after 3 consecutive pages of only duplicates
+      const discoveryResult = await discoverScholarships(profile, selectedSources, 20);
+
+      // Store source stats for display
+      setSourceStats(discoveryResult.sourceStats);
 
       if (!discoveryResult.success && discoveryResult.scholarships.length === 0) {
         setError(discoveryResult.errors.join('; ') || 'No scholarships found');
@@ -126,10 +201,12 @@ export default function Dashboard() {
 
       // Step 2: Analyze each discovered scholarship
       let analyzedCount = 0;
+      const errors: string[] = [];
+      
       for (let i = 0; i < discovered.length; i++) {
         const scholarship = discovered[i];
         setDiscoveryProgress(
-          `Analyzing ${i + 1}/${discovered.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved)`
+          `Analyzing ${i + 1}/${discovered.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved, ${errors.length} failed)`
         );
 
         try {
@@ -137,25 +214,36 @@ export default function Dashboard() {
 
           if (result.success) {
             // Save to database
-            await insertScholarship(result.scholarship);
-            analyzedCount++;
+            const insertResult = await insertScholarship(result.scholarship);
             
-            // Store any questions that need answering
-            if (result.scholarship.questionsForUser.length > 0) {
-              addQuestions(
-                result.scholarship.id,
-                result.scholarship.name,
-                result.scholarship.questionsForUser
-              );
+            if (insertResult.success) {
+              analyzedCount++;
+              
+              // Store any questions that need answering
+              if (result.scholarship.questionsForUser.length > 0) {
+                addQuestions(
+                  result.scholarship.id,
+                  result.scholarship.name,
+                  result.scholarship.questionsForUser
+                );
+              }
+            } else {
+              errors.push(`${scholarship.name}: Failed to save to database`);
+              console.error(`Failed to insert ${scholarship.url}`);
             }
+          } else {
+            errors.push(`${scholarship.name}: ${result.error}`);
+            console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
           }
         } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+          errors.push(`${scholarship.name}: ${errorMsg}`);
           console.error(`Failed to analyze ${scholarship.url}:`, err);
         }
 
-        // Small delay between analyses to avoid rate limiting
+        // Delay between analyses to avoid rate limiting (2 seconds per request)
         if (i < discovered.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+          await new Promise((resolve) => setTimeout(resolve, 2000));
         }
       }
 
@@ -165,12 +253,23 @@ export default function Dashboard() {
 
       setDiscoveryProgress('');
       
-      const successMsg = `Successfully analyzed and saved ${analyzedCount} new scholarships!`;
-      if (discoveryResult.errors.length > 0) {
-        setError(`${successMsg} Warnings: ${discoveryResult.errors.join('; ')}`);
-      } else {
-        setError(successMsg);
+      // Show detailed results
+      let resultMsg = `✓ Successfully analyzed and saved ${analyzedCount} new scholarships!`;
+      
+      if (errors.length > 0) {
+        resultMsg += `\n\n⚠️ ${errors.length} failed to analyze:\n`;
+        // Show first 5 errors in detail
+        resultMsg += errors.slice(0, 5).map(e => `• ${e}`).join('\n');
+        if (errors.length > 5) {
+          resultMsg += `\n• ... and ${errors.length - 5} more`;
+        }
       }
+      
+      if (discoveryResult.errors.length > 0) {
+        resultMsg += `\n\n⚠️ Source errors: ${discoveryResult.errors.join('; ')}`;
+      }
+      
+      setError(resultMsg);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to discover scholarships');
     } finally {
@@ -433,38 +532,175 @@ export default function Dashboard() {
                   border: '1px solid var(--border)',
                 }}
               >
-                <div className="text-sm font-medium mb-3" style={{ color: 'var(--foreground)' }}>
-                  Select scholarship sources to search:
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-medium" style={{ color: 'var(--foreground)' }}>
+                    Select scholarship sources to search:
+                  </div>
+                  <button
+                    onClick={() => setShowAddSource(!showAddSource)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:scale-[1.02]"
+                    style={{
+                      background: 'var(--accent-bg)',
+                      border: '1px solid var(--accent)',
+                      color: 'var(--accent)',
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M12 5v14M5 12h14" />
+                    </svg>
+                    Add Source
+                  </button>
                 </div>
-                <div className="flex flex-wrap gap-3">
-                  {scholarshipSources
-                    .filter((source) => source.enabled)
-                    .map((source) => (
-                      <label
-                        key={source.id}
-                        className="flex items-center gap-2 px-4 py-2 rounded-lg cursor-pointer transition-all hover:scale-[1.02]"
-                        style={{
-                          background: selectedSources.includes(source.id)
-                            ? 'var(--accent-bg)'
-                            : 'var(--background)',
-                          border: `1px solid ${selectedSources.includes(source.id) ? 'var(--accent)' : 'var(--border)'}`,
-                          color: selectedSources.includes(source.id)
-                            ? 'var(--accent)'
-                            : 'var(--foreground)',
-                        }}
+
+                {/* Add Source Form */}
+                {showAddSource && (
+                  <div
+                    className="mb-4 p-3 rounded-lg animate-fade-in"
+                    style={{ background: 'var(--background)', border: '1px solid var(--border)' }}
+                  >
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <input
+                        type="text"
+                        value={newSourceName}
+                        onChange={(e) => setNewSourceName(e.target.value)}
+                        placeholder="Source name (e.g., MyScholarships)"
+                        className="flex-1 px-3 py-2 rounded-lg text-sm"
+                        style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--foreground)' }}
+                      />
+                      <input
+                        type="url"
+                        value={newSourceUrl}
+                        onChange={(e) => setNewSourceUrl(e.target.value)}
+                        placeholder="Scholarship listing URL"
+                        className="flex-[2] px-3 py-2 rounded-lg text-sm"
+                        style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--foreground)' }}
+                      />
+                      <button
+                        onClick={handleAddSource}
+                        disabled={addingSource}
+                        className="px-4 py-2 rounded-lg text-sm font-medium text-white transition-all hover:scale-[1.02] disabled:opacity-50"
+                        style={{ background: 'var(--accent)' }}
                       >
-                        <input
-                          type="checkbox"
-                          checked={selectedSources.includes(source.id)}
-                          onChange={() => toggleSource(source.id)}
-                          className="w-4 h-4 rounded accent-current"
-                        />
-                        <span className="text-sm font-medium">{source.name}</span>
-                      </label>
-                    ))}
+                        {addingSource ? 'Adding...' : 'Add'}
+                      </button>
+                    </div>
+                    <div className="mt-2 text-xs" style={{ color: 'var(--muted)' }}>
+                      Enter the URL of a page that lists multiple scholarships. The scraper will try to find scholarship links on that page.
+                    </div>
+                  </div>
+                )}
+
+                {/* Source List */}
+                <div className="flex flex-wrap gap-3">
+                  {allSources
+                    .filter((source) => source.enabled)
+                    .map((source) => {
+                      const stats = sourceStats.find(s => s.sourceId === source.id);
+                      const isCustom = source.id.startsWith('custom-');
+                      
+                      return (
+                        <div
+                          key={source.id}
+                          className="flex items-center gap-2 px-4 py-2 rounded-lg transition-all"
+                          style={{
+                            background: selectedSources.includes(source.id)
+                              ? 'var(--accent-bg)'
+                              : 'var(--background)',
+                            border: `1px solid ${selectedSources.includes(source.id) ? 'var(--accent)' : 'var(--border)'}`,
+                          }}
+                        >
+                          <label className="flex items-center gap-2 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={selectedSources.includes(source.id)}
+                              onChange={() => toggleSource(source.id)}
+                              className="w-4 h-4 rounded accent-current"
+                            />
+                            <span
+                              className="text-sm font-medium"
+                              style={{ color: selectedSources.includes(source.id) ? 'var(--accent)' : 'var(--foreground)' }}
+                            >
+                              {source.name}
+                            </span>
+                          </label>
+                          
+                          {/* Show stats if available */}
+                          {stats && (
+                            <span
+                              className="text-xs px-2 py-0.5 rounded-full"
+                              style={{
+                                background: stats.status === 'success' 
+                                  ? 'var(--success-bg)' 
+                                  : stats.status === 'partial' 
+                                    ? 'var(--warning-bg)' 
+                                    : 'var(--danger-bg)',
+                                color: stats.status === 'success' 
+                                  ? 'var(--success)' 
+                                  : stats.status === 'partial' 
+                                    ? 'var(--warning)' 
+                                    : 'var(--danger)',
+                              }}
+                              title={stats.error || `Found ${stats.found}, New: ${stats.new}, Duplicates: ${stats.duplicates}`}
+                            >
+                              {stats.status === 'failed' ? '0' : stats.new} new
+                            </span>
+                          )}
+                          
+                          {/* Delete button for custom sources */}
+                          {isCustom && (
+                            <button
+                              onClick={() => handleDeleteSource(source.id)}
+                              className="p-1 rounded hover:bg-red-100 dark:hover:bg-red-900/30 transition-colors"
+                              title="Delete source"
+                            >
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--danger)' }}>
+                                <path d="M18 6L6 18M6 6l12 12" />
+                              </svg>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
                 </div>
+
+                {/* Source Stats Summary */}
+                {sourceStats.length > 0 && (
+                  <div
+                    className="mt-4 p-3 rounded-lg"
+                    style={{ background: 'var(--background)', border: '1px solid var(--border)' }}
+                  >
+                    <div className="text-xs font-medium mb-2" style={{ color: 'var(--foreground)' }}>
+                      Source Performance:
+                    </div>
+                    <div className="space-y-1">
+                      {sourceStats.map((stat) => (
+                        <div key={stat.sourceId} className="flex items-center justify-between text-xs">
+                          <span style={{ color: 'var(--foreground)' }}>{stat.sourceName}</span>
+                          <div className="flex items-center gap-2">
+                            <span style={{ color: 'var(--success)' }}>{stat.new} new</span>
+                            <span style={{ color: 'var(--muted)' }}>|</span>
+                            <span style={{ color: 'var(--warning)' }}>{stat.duplicates} dup</span>
+                            <span style={{ color: 'var(--muted)' }}>|</span>
+                            <span
+                              style={{
+                                color: stat.status === 'success' 
+                                  ? 'var(--success)' 
+                                  : stat.status === 'partial' 
+                                    ? 'var(--warning)' 
+                                    : 'var(--danger)',
+                              }}
+                            >
+                              {stat.status === 'success' ? '✓' : stat.status === 'partial' ? '⚠' : '✗'}
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div className="mt-3 text-xs" style={{ color: 'var(--muted)' }}>
-                  Tip: Scans 5-10 pages per source (~50-100 scholarships). May take 2-5 minutes. Duplicates are automatically skipped.
+                  Tip: Scans up to 20 pages per source using Puppeteer (handles JavaScript-rendered content). Will continue through up to 20 consecutive pages of duplicates and up to 3 consecutive empty pages to find new scholarships. May take 5-15 minutes depending on sources selected.
                 </div>
               </div>
             )}
@@ -682,6 +918,63 @@ export default function Dashboard() {
                       {/* Essay Draft */}
                       <td>
                         <div className="space-y-2">
+                          {/* AI Policy Badge & Generation Mode Dropdown */}
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {/* AI Policy Badge */}
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium"
+                              style={{
+                                background: scholarship.aiPolicy === 'Prohibited' 
+                                  ? 'var(--danger-bg)' 
+                                  : scholarship.aiPolicy === 'Safe' 
+                                    ? 'var(--success-bg)' 
+                                    : 'var(--warning-bg)',
+                                border: `1px solid ${
+                                  scholarship.aiPolicy === 'Prohibited' 
+                                    ? 'var(--danger-border)' 
+                                    : scholarship.aiPolicy === 'Safe' 
+                                      ? 'var(--success-border)' 
+                                      : 'var(--warning-border)'
+                                }`,
+                                color: scholarship.aiPolicy === 'Prohibited' 
+                                  ? 'var(--danger)' 
+                                  : scholarship.aiPolicy === 'Safe' 
+                                    ? 'var(--success)' 
+                                    : 'var(--warning)',
+                              }}
+                              title={
+                                scholarship.aiPolicy === 'Prohibited'
+                                  ? 'This scholarship prohibits AI-generated essays'
+                                  : scholarship.aiPolicy === 'Safe'
+                                    ? 'AI-generated essays appear to be allowed'
+                                    : 'AI policy is unclear for this scholarship'
+                              }
+                            >
+                              {scholarship.aiPolicy === 'Prohibited' ? '⛔' : scholarship.aiPolicy === 'Safe' ? '✅' : '❓'}
+                              {scholarship.aiPolicy === 'Prohibited' ? 'AI Prohibited' : scholarship.aiPolicy === 'Safe' ? 'AI Allowed' : 'AI Unsure'}
+                            </span>
+
+                            {/* Generation Mode Dropdown */}
+                            <select
+                              value={scholarship.generationPreference}
+                              onChange={(e) => handleGenerationPreferenceChange(scholarship.id, e.target.value as GenerationPreference)}
+                              className="px-2 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer"
+                              style={{
+                                background: 'var(--background)',
+                                border: '1px solid var(--border)',
+                                color: 'var(--foreground)',
+                              }}
+                            >
+                              <option value="Outline">Generate Outline</option>
+                              <option 
+                                value="Full Draft" 
+                                disabled={scholarship.aiPolicy === 'Prohibited'}
+                              >
+                                Generate Full Draft {scholarship.aiPolicy === 'Prohibited' ? '(Disabled)' : ''}
+                              </option>
+                            </select>
+                          </div>
+
                           <textarea
                             value={scholarship.draftedEssay}
                             onChange={(e) => handleEssayChange(scholarship.id, e.target.value)}

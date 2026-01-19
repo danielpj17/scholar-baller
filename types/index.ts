@@ -4,6 +4,9 @@ export enum EligibilityStatus {
   Unsure = 'Unsure',
 }
 
+export type AIPolicy = 'Safe' | 'Prohibited' | 'Unsure';
+export type GenerationPreference = 'Outline' | 'Full Draft';
+
 export interface Scholarship {
   id: string;
   name: string;
@@ -17,6 +20,8 @@ export interface Scholarship {
   questionsForUser: string[];
   essayPrompt: string;
   draftedEssay: string;
+  aiPolicy: AIPolicy;
+  generationPreference: GenerationPreference;
 }
 
 export interface Demographics {
