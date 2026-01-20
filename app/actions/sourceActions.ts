@@ -7,12 +7,11 @@ import {
   deleteCustomSource as dbDeleteCustomSource,
   toggleCustomSourceEnabled as dbToggleCustomSourceEnabled,
 } from '@/lib/db';
-import { ScholarshipSource, scholarshipSources } from '@/constants/sources';
+import { ScholarshipSource } from '@/constants/sources';
 
-// Get all sources (built-in + custom)
+// Get all sources (now all from database)
 export async function getAllSources(): Promise<ScholarshipSource[]> {
-  const customSources = await dbGetCustomSources();
-  return [...scholarshipSources, ...customSources];
+  return dbGetCustomSources();
 }
 
 // Get only custom sources

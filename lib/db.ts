@@ -99,6 +99,10 @@ export async function initializeDatabase() {
     `;
 
     console.log('Database initialized successfully');
+    
+    // Initialize default sources
+    await initializeDefaultSources();
+    
     return { success: true };
   } catch (error) {
     console.error('Error initializing database:', error);
@@ -239,5 +243,52 @@ export async function toggleCustomSourceEnabled(id: string): Promise<{ success: 
       success: false, 
       error: error instanceof Error ? error.message : 'Unknown error' 
     };
+  }
+}
+
+// Initialize default scholarship sources if they don't exist
+export async function initializeDefaultSources(): Promise<{ success: boolean; error?: any }> {
+  try {
+    const defaultSources = [
+      {
+        id: 'bold',
+        name: 'Bold.org',
+        baseUrl: 'https://bold.org',
+        searchUrl: 'https://bold.org/scholarships/',
+      },
+      {
+        id: 'scholarships360',
+        name: 'Scholarships360',
+        baseUrl: 'https://scholarships360.org',
+        searchUrl: 'https://scholarships360.org/scholarships/',
+      },
+      {
+        id: 'scholarshipscom',
+        name: 'Scholarships.com',
+        baseUrl: 'https://www.scholarships.com',
+        searchUrl: 'https://www.scholarships.com/financial-aid/college-scholarships/scholarship-directory',
+      },
+    ];
+
+    for (const source of defaultSources) {
+      // Check if source already exists
+      const existing = await sql`
+        SELECT id FROM custom_sources WHERE id = ${source.id}
+      ` as any[];
+      
+      if (existing.length === 0) {
+        // Insert the default source
+        await sql`
+          INSERT INTO custom_sources (id, name, base_url, search_url, enabled)
+          VALUES (${source.id}, ${source.name}, ${source.baseUrl}, ${source.searchUrl}, true)
+        `;
+        console.log(`Initialized default source: ${source.name}`);
+      }
+    }
+
+    return { success: true };
+  } catch (error) {
+    console.error('Error initializing default sources:', error);
+    return { success: false, error };
   }
 }

@@ -6,7 +6,7 @@ import { Scholarship, EligibilityStatus, GenerationPreference } from '@/types';
 import { useProfile } from '@/contexts/ProfileContext';
 import { analyzeScholarship } from '@/app/actions/analyzeScholarship';
 import { discoverScholarships, SourceStats } from '@/app/actions/discoverScholarships';
-import { scholarshipSources, ScholarshipSource } from '@/constants/sources';
+import { ScholarshipSource } from '@/constants/sources';
 import { insertScholarship, getScholarshipCounts, getAllScholarships, updateGenerationPreference } from '@/app/actions/scholarshipActions';
 import { getAllSources, addCustomSource, deleteCustomSource } from '@/app/actions/sourceActions';
 
@@ -22,14 +22,12 @@ export default function Dashboard() {
   // Discovery state
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [discoveryProgress, setDiscoveryProgress] = useState<string>('');
-  const [selectedSources, setSelectedSources] = useState<string[]>(
-    scholarshipSources.filter((s) => s.enabled).map((s) => s.id)
-  );
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
   const [showSourceSelector, setShowSourceSelector] = useState(false);
   const [sourceStats, setSourceStats] = useState<SourceStats[]>([]);
   
   // Custom source state
-  const [allSources, setAllSources] = useState<ScholarshipSource[]>(scholarshipSources);
+  const [allSources, setAllSources] = useState<ScholarshipSource[]>([]);
   const [showAddSource, setShowAddSource] = useState(false);
   const [newSourceName, setNewSourceName] = useState('');
   const [newSourceUrl, setNewSourceUrl] = useState('');
@@ -182,7 +180,8 @@ export default function Dashboard() {
     try {
       // Step 1: Discover scholarship URLs (with pagination and duplicate checking)
       // Limited to 10 pages per source for Bold.org and Scholarships360
-      const discoveryResult = await discoverScholarships(profile, selectedSources, 10);
+      // Target 15 new scholarships with interleaved page-by-page scraping
+      const discoveryResult = await discoverScholarships(profile, selectedSources, 10, 15);
 
       // Store source stats for display
       setSourceStats(discoveryResult.sourceStats);
@@ -195,83 +194,129 @@ export default function Dashboard() {
       }
 
       const discovered = discoveryResult.scholarships;
-      setDiscoveryProgress(
-        `Found ${discovered.length} new scholarships (${discoveryResult.duplicateCount} duplicates skipped). Analyzing...`
-      );
-
-      // Step 2: Analyze each discovered scholarship with proper rate limiting
-      // Limit to 15 scholarships per run to stay within Gemini API free tier (5 RPM)
-      // At 13 seconds per request, 15 requests = ~3.25 minutes, well within limits
-      const MAX_ANALYSIS_PER_RUN = 15;
-      const scholarshipsToAnalyze = discovered.slice(0, MAX_ANALYSIS_PER_RUN);
-      const skippedCount = discovered.length - scholarshipsToAnalyze.length;
-      let quotaExceeded = false;
       
-      if (skippedCount > 0) {
-        setDiscoveryProgress(
-          `Found ${discovered.length} scholarships. Analyzing first ${MAX_ANALYSIS_PER_RUN} to stay within API quota (${skippedCount} will be analyzed on next run)...`
-        );
-      } else {
-        setDiscoveryProgress(
-          `Found ${discovered.length} scholarships. Analyzing (limited to ${MAX_ANALYSIS_PER_RUN} per run to stay within API quota)...`
-        );
-      }
-      
+      // Check if scholarships were already analyzed during discovery
       let analyzedCount = 0;
       const errors: string[] = [];
       
-      // Rate limit: 13 seconds between requests for Gemini 2.5 Pro (5 RPM = 1 per 12 seconds)
-      // Using 13 seconds to be safe
-      const RATE_LIMIT_DELAY_MS = 13000;
-      
-      for (let i = 0; i < scholarshipsToAnalyze.length; i++) {
-        const scholarship = scholarshipsToAnalyze[i];
+      if (discoveryResult.analyzedScholarships && discoveryResult.analyzedScholarships.length > 0) {
+        // Scholarships were already analyzed during discovery
         setDiscoveryProgress(
-          `Analyzing ${i + 1}/${scholarshipsToAnalyze.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved, ${errors.length} failed)`
+          `Found ${discovered.length} new scholarships. ${discoveryResult.analyzedScholarships.length} were already analyzed. Saving to database...`
         );
-
-        try {
-          const result = await analyzeScholarship(scholarship.url, profile);
-
-          if (result.success) {
-            // Save to database
-            const insertResult = await insertScholarship(result.scholarship);
+        
+        // Save analyzed scholarships to database
+        for (const scholarship of discoveryResult.analyzedScholarships) {
+          try {
+            const insertResult = await insertScholarship(scholarship);
             
             if (insertResult.success) {
               analyzedCount++;
               
               // Store any questions that need answering
-              if (result.scholarship.questionsForUser.length > 0) {
+              if (scholarship.questionsForUser.length > 0) {
                 addQuestions(
-                  result.scholarship.id,
-                  result.scholarship.name,
-                  result.scholarship.questionsForUser
+                  scholarship.id,
+                  scholarship.name,
+                  scholarship.questionsForUser
                 );
               }
             } else {
               errors.push(`${scholarship.name}: Failed to save to database`);
               console.error(`Failed to insert ${scholarship.url}`);
             }
-          } else {
-            errors.push(`${scholarship.name}: ${result.error}`);
-            console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+            errors.push(`${scholarship.name}: ${errorMsg}`);
+            console.error(`Failed to save ${scholarship.url}:`, err);
+          }
+        }
+      } else {
+        // Fallback: Analyze discovered scholarships (if not already analyzed)
+        setDiscoveryProgress(
+          `Found ${discovered.length} new scholarships (${discoveryResult.duplicateCount} duplicates skipped). Analyzing...`
+        );
+
+        // Step 2: Analyze each discovered scholarship with proper rate limiting
+        // Limit to 15 scholarships per run to stay within Gemini API free tier (5 RPM)
+        // At 13 seconds per request, 15 requests = ~3.25 minutes, well within limits
+        const MAX_ANALYSIS_PER_RUN = 15;
+        const scholarshipsToAnalyze = discovered.slice(0, MAX_ANALYSIS_PER_RUN);
+        const skippedCount = discovered.length - scholarshipsToAnalyze.length;
+        let quotaExceeded = false;
+        
+        if (skippedCount > 0) {
+          setDiscoveryProgress(
+            `Found ${discovered.length} scholarships. Analyzing first ${MAX_ANALYSIS_PER_RUN} to stay within API quota (${skippedCount} will be analyzed on next run)...`
+          );
+        } else {
+          setDiscoveryProgress(
+            `Found ${discovered.length} scholarships. Analyzing (limited to ${MAX_ANALYSIS_PER_RUN} per run to stay within API quota)...`
+          );
+        }
+        
+        // Rate limit: 13 seconds between requests for Gemini 2.5 Pro (5 RPM = 1 per 12 seconds)
+        // Using 13 seconds to be safe
+        const RATE_LIMIT_DELAY_MS = 13000;
+        
+        for (let i = 0; i < scholarshipsToAnalyze.length; i++) {
+          const scholarship = scholarshipsToAnalyze[i];
+          setDiscoveryProgress(
+            `Analyzing ${i + 1}/${scholarshipsToAnalyze.length}: ${scholarship.name.substring(0, 40)}... (${analyzedCount} saved, ${errors.length} failed)`
+          );
+
+          try {
+            const result = await analyzeScholarship(scholarship.url, profile);
+
+            if (result.success) {
+              // Save to database
+              const insertResult = await insertScholarship(result.scholarship);
+              
+              if (insertResult.success) {
+                analyzedCount++;
+                
+                // Store any questions that need answering
+                if (result.scholarship.questionsForUser.length > 0) {
+                  addQuestions(
+                    result.scholarship.id,
+                    result.scholarship.name,
+                    result.scholarship.questionsForUser
+                  );
+                }
+              } else {
+                errors.push(`${scholarship.name}: Failed to save to database`);
+                console.error(`Failed to insert ${scholarship.url}`);
+              }
+            } else {
+              errors.push(`${scholarship.name}: ${result.error}`);
+              console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
+              
+              // If it's a quota error, stop processing to avoid more failures
+              const errorLower = result.error.toLowerCase();
+              const isQuotaError = errorLower.includes('quota') || 
+                                  result.error.includes('429') || 
+                                  errorLower.includes('quota exceeded') ||
+                                  errorLower.includes('rate limit') ||
+                                  errorLower.includes('too many requests');
+              
+              if (isQuotaError) {
+                console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+                quotaExceeded = true;
+                break;
+              }
+            }
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : 'Unknown error';
+            errors.push(`${scholarship.name}: ${errorMsg}`);
+            console.error(`Failed to analyze ${scholarship.url}:`, err);
             
-            // #region agent log
-            fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Analysis failed',data:{url:scholarship.url,name:scholarship.name,error:result.error,errorLower:result.error.toLowerCase(),hasQuota:result.error.toLowerCase().includes('quota'),has429:result.error.includes('429'),hasExceeded:result.error.toLowerCase().includes('exceeded')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'A'})}).catch(()=>{});
-            // #endregion
-            
-            // If it's a quota error, stop processing to avoid more failures
-            // Check for quota errors (case-insensitive and multiple patterns)
-            const errorLower = result.error.toLowerCase();
+            // If it's a quota error, stop processing
+            const errorLower = errorMsg.toLowerCase();
             const isQuotaError = errorLower.includes('quota') || 
-                                result.error.includes('429') || 
+                                errorMsg.includes('429') || 
                                 errorLower.includes('quota exceeded') ||
                                 errorLower.includes('rate limit') ||
                                 errorLower.includes('too many requests');
-            
-            // #region agent log
-            fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Quota check result',data:{isQuotaError,error:result.error},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'B'})}).catch(()=>{});
-            // #endregion
             
             if (isQuotaError) {
               console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
@@ -279,56 +324,16 @@ export default function Dashboard() {
               break;
             }
           }
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : 'Unknown error';
-          errors.push(`${scholarship.name}: ${errorMsg}`);
-          console.error(`Failed to analyze ${scholarship.url}:`, err);
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Exception caught',data:{url:scholarship.url,name:scholarship.name,errorMsg,errorLower:errorMsg.toLowerCase(),hasQuota:errorMsg.toLowerCase().includes('quota'),has429:errorMsg.includes('429')},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
-          
-          // If it's a quota error, stop processing
-          // Check for quota errors (case-insensitive and multiple patterns)
-          const errorLower = errorMsg.toLowerCase();
-          const isQuotaError = errorLower.includes('quota') || 
-                              errorMsg.includes('429') || 
-                              errorLower.includes('quota exceeded') ||
-                              errorLower.includes('rate limit') ||
-                              errorLower.includes('too many requests');
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Quota check result (exception)',data:{isQuotaError,errorMsg},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
-          
-          if (isQuotaError) {
-            console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
-            quotaExceeded = true;
-            break;
+
+          // Rate limiting: Wait 13 seconds between API calls to stay within 5 RPM limit
+          // Only delay if processing more than 15 scholarships (for larger batches)
+          if (i < scholarshipsToAnalyze.length - 1 && scholarshipsToAnalyze.length > 15) {
+            setDiscoveryProgress(
+              `Waiting ${RATE_LIMIT_DELAY_MS / 1000}s before next analysis (rate limiting)...`
+            );
+            await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_DELAY_MS));
           }
         }
-
-        // Rate limiting: Wait 13 seconds between API calls to stay within 5 RPM limit
-        // Only delay if not the last item
-        if (i < scholarshipsToAnalyze.length - 1) {
-          setDiscoveryProgress(
-            `Waiting ${RATE_LIMIT_DELAY_MS / 1000}s before next analysis (rate limiting)...`
-          );
-          await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_DELAY_MS));
-        }
-      }
-      
-      // Calculate total not analyzed (initial skip + early stop due to quota)
-      const remainingInBatch = quotaExceeded ? scholarshipsToAnalyze.length - analyzedCount - errors.length : 0;
-      const totalNotAnalyzed = skippedCount + remainingInBatch;
-      
-      // #region agent log
-      fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Analysis summary',data:{discovered:discovered.length,scholarshipsToAnalyze:scholarshipsToAnalyze.length,analyzedCount,skippedCount,remainingInBatch,totalNotAnalyzed,quotaExceeded,errorsCount:errors.length},timestamp:Date.now(),sessionId:'debug-session',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
-      
-      // If we skipped some, add them back to the discovered list for next time
-      if (totalNotAnalyzed > 0) {
-        console.log(`Note: ${totalNotAnalyzed} scholarships were not analyzed this run to stay within API quota. Run discovery again to analyze the remaining scholarships.`);
       }
 
       // Reload scholarships and counts from database
@@ -339,15 +344,10 @@ export default function Dashboard() {
       
       // Show detailed results
       let resultMsg = '';
-      if (quotaExceeded) {
-        resultMsg = `⚠️ API quota exceeded. Only ${analyzedCount} scholarship(s) were analyzed. ${totalNotAnalyzed > 0 ? `${totalNotAnalyzed} scholarship(s) were not analyzed this run to stay within API quota. ` : ''}Please wait for quota reset (typically daily) or upgrade your plan. Run discovery again to analyze the remaining scholarships.`;
-      } else if (analyzedCount > 0) {
+      if (analyzedCount > 0) {
         resultMsg = `✓ Successfully analyzed and saved ${analyzedCount} new scholarships!`;
-        if (totalNotAnalyzed > 0) {
-          resultMsg += ` (${totalNotAnalyzed} scholarships skipped to stay within API quota - run discovery again to analyze them)`;
-        }
       } else {
-        resultMsg = `No scholarships were analyzed. ${totalNotAnalyzed > 0 ? `${totalNotAnalyzed} skipped due to API quota limits. ` : ''}Run discovery again to analyze them.`;
+        resultMsg = `No scholarships were analyzed.`;
       }
       
       if (errors.length > 0) {
