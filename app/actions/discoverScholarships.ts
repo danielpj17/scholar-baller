@@ -1303,8 +1303,15 @@ export async function discoverScholarships(
     
     analyzedScholarships = [];
     const analysisErrors: string[] = [];
+    let quotaExceeded = false;
     
     for (let i = 0; i < limitedScholarships.length; i++) {
+      // Stop if quota was exceeded
+      if (quotaExceeded) {
+        console.warn(`API quota exceeded. Stopping analysis after ${i} scholarships. ${limitedScholarships.length - i} scholarships were not analyzed.`);
+        break;
+      }
+      
       const scholarship = limitedScholarships[i];
       console.log(`Analyzing scholarship ${i + 1}/${limitedScholarships.length}: ${scholarship.name}`);
       
@@ -1316,21 +1323,57 @@ export async function discoverScholarships(
         } else {
           analysisErrors.push(`${scholarship.name}: ${result.error}`);
           console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
+          
+          // Check if it's a quota error
+          const errorLower = result.error.toLowerCase();
+          const isQuotaError = errorLower.includes('quota') || 
+                              result.error.includes('429') || 
+                              errorLower.includes('quota exceeded') ||
+                              errorLower.includes('rate limit') ||
+                              errorLower.includes('too many requests');
+          
+          if (isQuotaError) {
+            quotaExceeded = true;
+            console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+            break;
+          }
         }
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : 'Unknown error';
         analysisErrors.push(`${scholarship.name}: ${errorMsg}`);
         console.error(`Failed to analyze ${scholarship.url}:`, error);
+        
+        // Check if it's a quota error
+        const errorLower = errorMsg.toLowerCase();
+        const isQuotaError = errorLower.includes('quota') || 
+                            errorMsg.includes('429') || 
+                            errorLower.includes('quota exceeded') ||
+                            errorLower.includes('rate limit') ||
+                            errorLower.includes('too many requests');
+        
+        if (isQuotaError) {
+          quotaExceeded = true;
+          console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+          break;
+        }
       }
       
       // Rate limiting between analysis calls (13 seconds for Gemini API)
-      if (i < limitedScholarships.length - 1) {
+      // Only delay if we're not stopping due to quota
+      if (i < limitedScholarships.length - 1 && !quotaExceeded) {
         await delay(13000);
       }
     }
     
     if (analysisErrors.length > 0) {
       errors.push(...analysisErrors);
+    }
+    
+    if (quotaExceeded) {
+      const remainingCount = limitedScholarships.length - analyzedScholarships.length - analysisErrors.length;
+      if (remainingCount > 0) {
+        errors.push(`API quota exceeded. ${remainingCount} scholarship(s) were not analyzed. Please wait for quota reset or upgrade your plan.`);
+      }
     }
     
     console.log(`Analysis complete: ${analyzedScholarships.length}/${limitedScholarships.length} scholarships successfully analyzed.`);
