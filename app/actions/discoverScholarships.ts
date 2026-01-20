@@ -1298,12 +1298,18 @@ export async function discoverScholarships(
 
   // Analyze the discovered scholarships if we found the target count
   let analyzedScholarships: Scholarship[] | undefined = undefined;
+  // #region agent log
+  fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Checking if analysis should run',data:{limitedScholarshipsLength:limitedScholarships.length,targetCount,shouldRun:limitedScholarships.length === targetCount && limitedScholarships.length > 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
   if (limitedScholarships.length === targetCount && limitedScholarships.length > 0) {
     console.log(`Target reached. Starting AI analysis for ${limitedScholarships.length} scholarships.`);
     
     analyzedScholarships = [];
     const analysisErrors: string[] = [];
     let quotaExceeded = false;
+    // #region agent log
+    fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Starting integrated analysis',data:{totalToAnalyze:limitedScholarships.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     
     for (let i = 0; i < limitedScholarships.length; i++) {
       // Stop if quota was exceeded
@@ -1320,6 +1326,9 @@ export async function discoverScholarships(
         
         if (result.success) {
           analyzedScholarships.push(result.scholarship);
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Analysis succeeded',data:{index:i+1,total:limitedScholarships.length,analyzedCount:analyzedScholarships.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
         } else {
           analysisErrors.push(`${scholarship.name}: ${result.error}`);
           console.error(`Analysis failed for ${scholarship.url}: ${result.error}`);
@@ -1331,10 +1340,16 @@ export async function discoverScholarships(
                               errorLower.includes('quota exceeded') ||
                               errorLower.includes('rate limit') ||
                               errorLower.includes('too many requests');
+          // #region agent log
+          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Analysis failed',data:{index:i+1,total:limitedScholarships.length,error:result.error,isQuotaError,analyzedCount:analyzedScholarships.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+          // #endregion
           
           if (isQuotaError) {
             quotaExceeded = true;
             console.warn('API quota exceeded. Stopping analysis to avoid further errors.');
+            // #region agent log
+            fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Quota exceeded detected',data:{index:i+1,analyzedCount:analyzedScholarships.length,willSetToUndefined:analyzedScholarships.length === 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+            // #endregion
             break;
           }
         }
@@ -1374,11 +1389,24 @@ export async function discoverScholarships(
       if (remainingCount > 0) {
         errors.push(`API quota exceeded. ${remainingCount} scholarship(s) were not analyzed. Please wait for quota reset or upgrade your plan.`);
       }
+      // If quota was exceeded and no scholarships were analyzed, set to undefined to prevent UI fallback
+      if (analyzedScholarships.length === 0) {
+        analyzedScholarships = undefined;
+        // #region agent log
+        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Setting analyzedScholarships to undefined due to quota',data:{reason:'quotaExceeded and no scholarships analyzed'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+      }
     }
     
-    console.log(`Analysis complete: ${analyzedScholarships.length}/${limitedScholarships.length} scholarships successfully analyzed.`);
+    console.log(`Analysis complete: ${analyzedScholarships?.length || 0}/${limitedScholarships.length} scholarships successfully analyzed.`);
+    // #region agent log
+    fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Analysis complete',data:{analyzedCount:analyzedScholarships?.length || 0,total:limitedScholarships.length,isUndefined:analyzedScholarships === undefined,isEmptyArray:Array.isArray(analyzedScholarships) && analyzedScholarships.length === 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
   }
 
+  // #region agent log
+  fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'discoverScholarships.ts:discoverScholarships',message:'Returning discovery result',data:{scholarshipsCount:limitedScholarships.length,analyzedScholarshipsCount:analyzedScholarships?.length || 0,analyzedScholarshipsIsUndefined:analyzedScholarships === undefined,analyzedScholarshipsIsEmpty:Array.isArray(analyzedScholarships) && analyzedScholarships.length === 0,errorsCount:errors.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
   return {
     success: uniqueScholarships.length > 0 || errors.length === 0,
     scholarships: limitedScholarships,

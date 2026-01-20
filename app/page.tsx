@@ -199,6 +199,12 @@ export default function Dashboard() {
       let analyzedCount = 0;
       const errors: string[] = [];
       
+      // #region agent log
+      if (typeof window !== 'undefined') {
+        fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Checking analyzedScholarships',data:{hasAnalyzedScholarships:!!discoveryResult.analyzedScholarships,isArray:Array.isArray(discoveryResult.analyzedScholarships),length:discoveryResult.analyzedScholarships?.length || 0,isUndefined:discoveryResult.analyzedScholarships === undefined,willUseIntegrated:discoveryResult.analyzedScholarships && discoveryResult.analyzedScholarships.length > 0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      }
+      // #endregion
+      
       if (discoveryResult.analyzedScholarships && discoveryResult.analyzedScholarships.length > 0) {
         // Scholarships were already analyzed during discovery
         setDiscoveryProgress(
@@ -233,6 +239,11 @@ export default function Dashboard() {
         }
       } else {
         // Fallback: Analyze discovered scholarships (if not already analyzed)
+        // #region agent log
+        if (typeof window !== 'undefined') {
+          fetch('http://127.0.0.1:7245/ingest/ab30dae8-343a-41dc-b78c-5ced78e59758',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'page.tsx:handleDiscover',message:'Using fallback manual analysis',data:{discoveredCount:discovered.length,reason:!discoveryResult.analyzedScholarships ? 'analyzedScholarships is undefined' : 'analyzedScholarships is empty array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        }
+        // #endregion
         setDiscoveryProgress(
           `Found ${discovered.length} new scholarships (${discoveryResult.duplicateCount} duplicates skipped). Analyzing...`
         );
